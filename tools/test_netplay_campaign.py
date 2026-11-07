@@ -70,7 +70,9 @@ def child(args):
 
     try:
         result = run_campaign(directory, client, output / f'{args.slot}.jsonl', seconds=300,
-                              control=control, full_log=True, checkpoint=initial, save_store=store)
+                              control=control, full_log=True, checkpoint=initial, save_store=store,
+                              stage=json.loads(args.stage_file.read_bytes()) if args.stage_file else None,
+                              stage_observer=lambda value: (output / f'{args.slot}.stage-{value["stage"]}.json').write_text(json.dumps(value)))
         (output / f'{args.slot}.result.json').write_text(json.dumps(result))
     finally:
         client.close()
@@ -96,6 +98,8 @@ def parent(args):
                        '--game', str(args.game)]
             if args.restore:
                 command += ['--restore', str(args.restore)]
+            if args.stage_file:
+                command += ['--stage-file', str(args.stage_file)]
             for option in ('advance', 'pause', 'perturb_state'):
                 if getattr(args, option):
                     command += ['--' + option.replace('_', '-')]
@@ -152,6 +156,7 @@ if __name__ == '__main__':
     parser.add_argument('--frames', type=int, default=7200)
     parser.add_argument('--players', type=int, choices=(2, 3), default=3)
     parser.add_argument('--restore', type=Path)
+    parser.add_argument('--stage-file', type=Path)
     parser.add_argument('--advance', action='store_true')
     parser.add_argument('--pause', action='store_true')
     parser.add_argument('--perturb-state', action='store_true')

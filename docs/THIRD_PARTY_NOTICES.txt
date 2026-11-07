@@ -19,3 +19,15 @@ No RBO executable, PAC assets, installer, save files or extracted game data are
 included in the repository or release archive. Each participant supplies their
 own compatible game installation. This is an independent experimental project
 and is not an official RBO distribution or update.
+
+Korean localization
+
+The release contains a delta pack of Korean translations, newly rendered menu
+labels and additional bitmap glyphs. It requires original resources with the
+specified hashes and reconstructs localized copies only on the user's PC.
+It does not contain complete original IMG, FOB or FNT files, or any English
+patch file. The existing English patch was consulted for layout/context only.
+
+Glyph and label images were rendered using the Windows-installed Malgun Gothic
+font. No font software (TTF/TTC/OTF), Windows library or Pillow runtime is bundled.
+Original creator credits and game ownership remain with their respective owners.

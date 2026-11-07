@@ -83,6 +83,10 @@ class Debugger:
         self.breakpoints[address]=(self.read(address,1),callback)
         self.write(address,b'\xcc')
 
+    def remove_breakpoint(self, address):
+        original, _ = self.breakpoints.pop(address)
+        self.write(address, original)
+
     def run(self,on_create,seconds=120):
         deadline=time.monotonic()+seconds if seconds is not None else None
         try:
@@ -124,9 +128,10 @@ class Debugger:
                                 # the event for process cleanup.
                                 check(SetContext(thread,C.byref(ctx)))
                                 return
-                            ctx.eflags|=0x100
+                            if addr in self.breakpoints:
+                                ctx.eflags|=0x100
+                                self.stepping[event.tid]=addr
                             check(SetContext(thread,C.byref(ctx)))
-                            self.stepping[event.tid]=addr
                         elif code in (0x80000004,0x4000001e) and event.tid in self.stepping:
                             addr=self.stepping.pop(event.tid)
                             self.write(addr,b'\xcc')
@@ -139,6 +144,22 @@ class Debugger:
         finally:
             if not self.exited:
                 Terminate(self.handle,0)
+                # Debug events are queued per debugger thread, not per object.
+                # Drain this child's termination before a recovery creates the
+                # next child on the same thread, or stale thread IDs leak in.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    ended = Event()
+                    if not Wait(C.byref(ended), 100):
+                        continue
+                    if ended.code == 6 and ended.u.dll.file:
+                        Close(ended.u.dll.file)
+                    if ended.code == 2:
+                        self.threads[ended.tid] = ended.u.thread.thread
+                    check(Continue(ended.pid, ended.tid, 0x10002))
+                    if ended.pid == self.pid and ended.code == 5:
+                        self.exited = True
+                        break
             for thread in self.threads.values():
                 if thread!=self.info.thread:Close(thread)
             Close(self.info.thread);Close(self.handle)

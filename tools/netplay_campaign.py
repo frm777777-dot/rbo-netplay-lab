@@ -7,9 +7,10 @@ import time
 from collections import deque
 
 from netplay_game import FrameLog, capture_state
-from netplay_protocol import require, ProtocolError, SessionEnded
+from netplay_protocol import require, ProtocolError, SessionEnded, GameCrashed
 from win32_debug import Debugger
-from netplay_saves import capture as capture_saves
+from netplay_saves import capture as capture_saves, encode
+from netplay_stage import capture_stage, restore_stage
 
 TICK_HZ = 120
 DEFAULT_KEYS = (35, 49, 48, 50, 44, 45, 46, 47, 16)
@@ -20,7 +21,7 @@ def patch(d, address, expected, replacement):
     d.write(address, replacement)
 
 
-def run_campaign(directory, client, log_path, *, seconds=None, control=None, full_log=False, checkpoint=None, save_store=None):
+def run_campaign(directory, client, log_path, *, seconds=None, control=None, full_log=False, checkpoint=None, save_store=None, stage=None, stage_observer=None):
     directory, log_path = Path(directory), Path(log_path)
     frame = 0
     last_scene = None
@@ -32,6 +33,8 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
     save_dirty = False
     clock_data = None
     recent = deque(maxlen=client.delay + 8)
+    stage_pending = None
+    restore_pending = stage is not None
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with FrameLog(log_path, bounded=not full_log) as log:
         def seed(d, ctx):
@@ -40,7 +43,7 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             d.write(ctx.esp + 8, struct.pack('<I', (0x12345678 + index * 0x11111111) & 0x7fffffff))
 
         def poll(d, ctx):
-            nonlocal frame, last_scene, next_tick, mapping, published, committed, save_dirty
+            nonlocal frame, last_scene, next_tick, mapping, published, committed, save_dirty, stage_pending
             if client.frames and frame == client.frames:
                 return False
             d.write(clock_data, struct.pack('<QI', frame * 10000, frame * 1000 // TICK_HZ & 0xffffffff))
@@ -86,6 +89,8 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
                 meta['pause'] = d.words(0xbc7af8, 4)
                 meta['battle_phase'] = d.uint(0xadff7c)
                 meta['combat'] = capture_state(d, raw)
+            if stage_pending is not None and frame:
+                meta['stage_checkpoint'] = hashlib.sha256(encode(stage_pending)).hexdigest()
             digest = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest() if frame else None
             recent.append({'frame': frame, 'state': meta, 'entities': raw})
             update = None
@@ -96,7 +101,10 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
                     published = current
                 save_dirty = False
             try:
-                inputs = client.exchange(local, digest, checkpoint=update, detail=meta)
+                extra = {'stage': stage_pending} if frame and client.slot == 0 and getattr(client, 'supports_recovery', False) else {}
+                inputs = client.exchange(local, digest, checkpoint=update, detail=meta, **extra)
+                if frame:
+                    stage_pending = None
             except SessionEnded:
                 raise
             except ProtocolError:
@@ -133,6 +141,8 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
         def created(d):
             nonlocal clock_data
             require(d.base == 0x400000, 'Unsupported image base')
+            from netplay_korean import attach
+            attach(d, directory)
             patch(d, 0x427900, bytes.fromhex('8b4424048b4c'), bytes.fromhex('b801000000c3'))
             # Virtualize the game's timer wrappers, not Windows or other apps.
             # 1,200,000 ticks/sec gives exact 120 Hz updates and 60 Hz drawing.
@@ -144,7 +154,18 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
                 d.write(ctx.esp, struct.pack('<Q', 1200000))
                 ctx.eax = 1
             d.breakpoint(0x46a69e, frequency)
-            d.write(0x497578, struct.pack('<I', 2))
+            # Recovery first initializes the native bar's per-player menu
+            # objects; a direct battle boot leaves them null after a clear.
+            d.write(0x497578, struct.pack('<I', 4 if stage else 2))
+            def recovery_boot(d, ctx):
+                if restore_pending and d.uint(0xbc91a0) == 4:
+                    d.remove_breakpoint(0x43fab0)
+                    d.write(0xbc91a4, bytes(4))
+                    ctx.eax = 1
+                    ctx.eip = d.uint(ctx.esp)
+                    ctx.esp += 4
+            if stage:
+                d.breakpoint(0x43fab0, recovery_boot)
             # Stay at the online title menu instead of entering attract mode.
             patch(d, 0x477380, bytes.fromhex('e8'), bytes.fromhex('b801000000c3'))
             # Title transition already waits for its frame-counted fade. Do not
@@ -162,6 +183,16 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
                 if d.uint(0x2553c20) == 0xffffffff:
                     d.write(0x2553c20, b'\0' * 4)
             d.breakpoint(0x467e70, map_start)
+            def stage_start(d, ctx):
+                nonlocal restore_pending, stage_pending
+                if restore_pending:
+                    restore_stage(d, stage, client.players)
+                    restore_pending = False
+                if d.uint(0xadeb2c) == 1 and d.uint(0xb064b4) == 0:
+                    stage_pending = capture_stage(d, client.players)
+                    if stage_observer:
+                        stage_observer(stage_pending)
+            d.breakpoint(0x43bd00, stage_start)
             # Native local play accepts any number of joined characters. An
             # online room must wait for every assigned player before selection.
             def party_ready(d, ctx):
@@ -181,7 +212,7 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             debugger = Debugger(directory / 'rbo_ex3.exe')
             debugger.run(created, seconds)
             if debugger.exit_code not in (None, 0):
-                raise ProtocolError(f'Game process exited with code 0x{debugger.exit_code:08x}')
+                raise GameCrashed(f'Game process exited with code 0x{debugger.exit_code:08x}')
             if client.frames:
                 require(frame == client.frames, f'Game stopped early: {frame}/{client.frames}')
             client.finish()

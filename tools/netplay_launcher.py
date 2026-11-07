@@ -15,7 +15,8 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from netplay_campaign import run_campaign
-from netplay_protocol import Client, ProtocolError, Room, Server, fingerprint, require
+from netplay_protocol import ProtocolError, RecoveryNeeded, TransportError, GameCrashed, fingerprint, require
+from netplay_recovery import RecoveryClient as Client, RecoveryRoom as Room, RecoveryServer as Server
 from netplay_saves import SaveStore, encode, validate, materialize
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +60,8 @@ def isolated_game(source):
     (target / 'DATA/etc/ex3_old_rbo_path.end').write_bytes(record.ljust(260, b'\0') * 3)
     for name in ('_FCommand1st.Txt', '_FCommand.Txt'):
         (target / name).write_text('BootScreenMode WINDOW\n', encoding='ascii')
+    from netplay_korean import install
+    install(source, target)
     return target
 
 
@@ -95,7 +98,7 @@ def main():
     parser.add_argument('--saves-dir', type=Path, default=ROOT / 'saves', help='Online save root')
     args = parser.parse_args()
     require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
-    print('RBO 2~3인 온라인 실험판 v0.4.0 — 일반 진행 / 온라인 저장')
+    print('RBO 2~3인 온라인 실험판 v0.5.0 — 자동 재접속 / 스테이지 복구 / 한글')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
     print('공통 메뉴와 출발은 1P, 캐릭터 선택·생성과 전투는 각자 조작합니다.')
     print('호스트가 전원 저장하고 친구 PC에도 사본을 보관합니다.\n')
@@ -126,11 +129,11 @@ def main():
                 raise ProtocolError('같은 저장 폴더를 사용하는 호스트가 이미 실행 중입니다.')
             checkpoint = save_store.load()
             room = Room(secrets.token_urlsafe(18), secrets.token_urlsafe(24),
-                        frames=args.frames, delay=args.delay, timeout=180, players=players)
+                        frames=args.frames, delay=args.delay, timeout=45, players=players)
             server = Server(room, (args.bind, args.port))
             thread = threading.Thread(target=server.serve, daemon=True)
             thread.start()
-            client = Client(('127.0.0.1', args.port), room.host_token, game_hash, 'host', timeout=180)
+            client = Client(('127.0.0.1', args.port), room.host_token, game_hash, 'host', timeout=45)
             print(f'서버 포트: TCP {args.port}')
             print(f'친구에게 전달할 방 코드: {room.token}')
             print('친구는 Join-Online.cmd에서 이 PC의 접속 주소와 방 코드를 입력합니다.')
@@ -139,10 +142,14 @@ def main():
             address = args.address or input('호스트 PC 주소: ').strip()
             token = input('방 코드: ').strip()
             print('호스트에 연결하고 있습니다…')
-            client = Client((address, args.port), token, game_hash, timeout=180)
+            client = Client((address, args.port), token, game_hash, timeout=45)
         print(f'내 캐릭터: {client.slot + 1}P / 내 키 설정: 로컬 1P')
         print(f'{client.players}명이 연결될 때까지 기다린 뒤 함께 타이틀 화면을 엽니다.')
-        initial = client.ready(encode(checkpoint) if checkpoint is not None else None)
+        initial_header = encode(checkpoint) if checkpoint is not None else None
+        try:
+            initial = client.ready(initial_header)
+        except (RecoveryNeeded, TransportError):
+            initial = client.reconnect(initial_header)
         checkpoint = json.loads(initial)
         validate(checkpoint)
         if save_store is None:
@@ -151,13 +158,31 @@ def main():
         materialize(checkpoint, directory / 'DATA/SaveData')
         print(f'온라인 저장 폴더: {save_store.directory}')
         print('1P가 타이틀에서 Z로 시작하고, 캐릭터 화면에서 모두 Z로 참가하세요.')
-        print('게임 자체의 저장 시점에 저장됩니다. 전투 도중의 위치를 재개하는 기능은 아닙니다.')
+        print('연결이 끊기거나 진행이 어긋나면 자동으로 재접속하고 스테이지 시작 지점으로 돌아갑니다.')
+        print('복구 중에는 게임 창이 다시 열립니다. 실행기 창은 닫지 마세요.')
+        print('저장된 캐릭터는 유지되며, 복구가 반복되면 저장본을 유지한 채 타이틀로 돌아갑니다.')
         print('게임 창에 포커스를 두고 조작하세요. 창을 닫으면 방 전체가 종료됩니다.')
         print('플레이 시간 제한 없이 진행합니다. 종료하려면 게임 창을 닫으세요.' if not client.frames
               else f'개발 검사: {client.frames}프레임 뒤 종료합니다.')
-        with (logs / 'bridge.txt').open('w', encoding='utf-8') as diagnostic, contextlib.redirect_stdout(diagnostic):
-            result = run_campaign(directory, client, logs / 'frames.jsonl', seconds=None,
-                                  checkpoint=checkpoint, save_store=save_store)
+        while True:
+            generation_logs = logs if client.epoch == 0 else logs / f'recovery-{client.epoch:03d}'
+            generation_logs.mkdir(exist_ok=True)
+            try:
+                with (generation_logs / 'bridge.txt').open('w', encoding='utf-8') as diagnostic, contextlib.redirect_stdout(diagnostic):
+                    result = run_campaign(directory, client, generation_logs / 'frames.jsonl', seconds=None,
+                                          checkpoint=checkpoint, save_store=save_store, stage=client.stage)
+                break
+            except (RecoveryNeeded, TransportError, GameCrashed) as error:
+                print(f'일시 중단: {error}')
+                client.request_recovery()
+                checkpoint = json.loads(client.reconnect(initial_header))
+                save_store.commit(checkpoint)
+                directory = isolated_game(source)
+                materialize(checkpoint, directory / 'DATA/SaveData')
+                if client.stage is None:
+                    print('저장된 캐릭터를 유지하고 타이틀 화면을 다시 엽니다.')
+                else:
+                    print(f'{client.stage["stage"] + 1}스테이지 시작 지점으로 복구합니다. 내 캐릭터: {client.slot + 1}P')
         (logs / 'result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
         print('시험 세션을 정상 종료했습니다.')
         print(f'온라인 저장과 사본은 다음 실행에도 유지됩니다: {save_store.directory}')
@@ -173,6 +198,7 @@ def main():
                 client.close()
             if server:
                 (logs / 'server.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in server.room.audit))
+                (logs / 'recovery.json').write_text(json.dumps(list(server.room.recovery_history), ensure_ascii=False, indent=2), encoding='utf-8')
                 if server.room.failure_details:
                     (logs / 'divergence.json').write_text(json.dumps(server.room.failure_details, ensure_ascii=False, indent=2), encoding='utf-8')
                 if server.room.checkpoint is not None and save_store is not None:

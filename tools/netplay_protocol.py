@@ -9,13 +9,25 @@ import struct
 import threading
 import time
 
-VERSION = 'rbo-ex3-lab-4'
+VERSION = 'rbo-ex3-lab-5'
 MAX_MESSAGE = 768 * 1024
 MAX_INPUT = 0x3001ff  # nine native actions plus host F12/Escape
 EXPECTED_EXE = '05b14b047e49dabb026c96150f8d5aab497d20d9b2d52f5e59a8aef1af5b8dc0'
 
 
 class ProtocolError(RuntimeError):
+    pass
+
+
+class TransportError(ProtocolError):
+    """A socket interruption, distinct from invalid or incompatible messages."""
+
+
+class RecoveryNeeded(ProtocolError):
+    """The coordinator invalidated this simulation; restart from its checkpoint."""
+
+
+class GameCrashed(ProtocolError):
     pass
 
 
@@ -37,14 +49,14 @@ def receive_exact(sock, length):
         try:
             part = sock.recv(length - len(data))
         except OSError as exc:
-            raise ProtocolError(f'Connection closed or timed out: {exc}') from exc
+            raise TransportError(f'Connection closed or timed out: {exc}') from exc
         if not part:
-            raise ProtocolError('Connection closed')
+            raise TransportError('Connection closed')
         data.extend(part)
     return bytes(data)
 
 
-def receive(sock):
+def receive(sock, *, recovery_signal=True):
     length = struct.unpack('!I', receive_exact(sock, 4))[0]
     require(0 < length <= MAX_MESSAGE, 'Message too large')
     try:
@@ -52,6 +64,8 @@ def receive(sock):
     except (ValueError, UnicodeError) as exc:
         raise ProtocolError('Invalid JSON') from exc
     require(type(result) is dict, 'Expected an object')
+    if recovery_signal and result.get('type') == 'recover':
+        raise RecoveryNeeded(str(result.get('message', 'Reloading the stage')))
     if result.get('type') == 'error':
         raise ProtocolError(str(result.get('message', 'Session stopped')))
     if result.get('type') == 'ended':
@@ -72,7 +86,7 @@ def send(sock, value):
     try:
         sock.sendall(struct.pack('!I', len(data)) + data)
     except OSError as exc:
-        raise ProtocolError(f'Connection closed or timed out: {exc}') from exc
+        raise TransportError(f'Connection closed or timed out: {exc}') from exc
 
 
 def fingerprint(directory):
@@ -84,6 +98,8 @@ def fingerprint(directory):
     files = [exe] + sorted((directory / 'DATA').glob('*.pac'), key=lambda p: p.name.lower())
     require(len(files) > 1, 'No game data found')
     digest = hashlib.sha256()
+    from netplay_korean import pack_hash
+    digest.update(pack_hash().encode('ascii'))
     for path in files:
         digest.update(path.name.lower().encode('utf-8') + b'\0')
         with path.open('rb') as source:
