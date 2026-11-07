@@ -176,6 +176,17 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             patch(d, 0x406960, bytes.fromhex('5633f656'), bytes.fromhex('b801000000c3'))
             patch(d, 0x4069b0, bytes.fromhex('6a01e829ff05'), bytes.fromhex('b801000000c3'))
             patch(d, 0x457790, bytes.fromhex('6a01e849f100'), bytes.fromhex('b801000000c3'))
+            # Native BGM completion also gates bar/result/map transitions. A
+            # muted peer reports completion immediately, unlike a playing peer.
+            # Keep the surrounding frame-counted fade/timer checks, bypass only
+            # these menu-local audio queries; leave the audio engine untouched.
+            for address in (0x4079d5, 0x4079e3, 0x40ab5d, 0x40ab6b,
+                            0x40abce, 0x40abe0, 0x4682b5, 0x4682e7):
+                expected = b'\xe8' + struct.pack('<i', 0x4666e0 - address - 5)
+                patch(d, address, expected, bytes.fromhex('31c0909090'))
+            # Result-to-bar transition already waits for its visual fade and a
+            # fixed timer. Its additional volume-envelope wait is local audio.
+            patch(d, 0x458600, bytes.fromhex('56be14000000'), bytes.fromhex('b801000000c3'))
             # Normal-mode replay recording is separate from character saves.
             # Skip its finite input buffer and 25/30-minute warning popups.
             patch(d, 0x438edf, bytes.fromhex('8b0db064b000'), bytes.fromhex('e98700000090'))

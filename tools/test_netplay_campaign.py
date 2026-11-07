@@ -24,6 +24,19 @@ from netplay_saves import SaveStore, encode, validate, materialize
 def child(args):
     directory = isolated_game(args.game)
     output = Path(args.out)
+    if args.mixed_settings:
+        # Match original configuration-tool output, with different preferences
+        # on every peer. Check inheritance before changing this owned copy.
+        config = directory / 'DATA/SaveData/SystemConfig.v4'
+        assert config.read_bytes() == (args.game / 'DATA/SaveData/SystemConfig.v4').read_bytes()
+        values = list(struct.unpack('<20I', config.read_bytes()))
+        values[1] = 0  # Windowed, as required by the online launcher.
+        values[2] = (0, 2, 3)[args.slot]  # 640, 800, 1024 pixel width.
+        values[6:12] = [16 if args.slot == 0 else 32] * 6
+        values[15] = (0, 3, 2)[args.slot]  # All audio, movies only, no BGM.
+        values[16] = 30 if args.slot == 1 else 60
+        config.write_bytes(struct.pack('<20I', *values))
+        (output / f'{args.slot}.settings.json').write_text(json.dumps(values))
     (output / f'{args.slot}.runtime.txt').write_text(str(directory))
     client = Client(('127.0.0.1', args.port), args.token, fingerprint(directory),
                     'host' if args.slot == 0 else 'guest')
@@ -100,7 +113,7 @@ def parent(args):
                 command += ['--restore', str(args.restore)]
             if args.stage_file:
                 command += ['--stage-file', str(args.stage_file)]
-            for option in ('advance', 'pause', 'perturb_state'):
+            for option in ('advance', 'pause', 'perturb_state', 'mixed_settings'):
                 if getattr(args, option):
                     command += ['--' + option.replace('_', '-')]
             processes.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
@@ -123,6 +136,7 @@ def parent(args):
                    'save_revision': saves[0]['revision'], 'save_files': sorted(saves[0]['files']),
                    'elapsed': round(time.monotonic() - started, 2), 'forced_clear': args.advance,
                    'negative_control': args.perturb_state}
+        summary['mixed_local_settings'] = args.mixed_settings
         (output / 'summary.json').write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary), flush=True)
         if args.perturb_state:
@@ -160,5 +174,6 @@ if __name__ == '__main__':
     parser.add_argument('--advance', action='store_true')
     parser.add_argument('--pause', action='store_true')
     parser.add_argument('--perturb-state', action='store_true')
+    parser.add_argument('--mixed-settings', action='store_true')
     options = parser.parse_args()
     child(options) if options.slot is not None else parent(options)

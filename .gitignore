@@ -5,12 +5,14 @@
 !README.md
 !Host-Online.cmd
 !Join-Online.cmd
+!Settings-Online.cmd
 !온라인 시험판 사용법.txt
 !tools/
 tools/*
 !tools/netplay_protocol.py
 !tools/netplay_game.py
 !tools/netplay_launcher.py
+!tools/netplay_config.py
 !tools/netplay_campaign.py
 !tools/netplay_saves.py
 !tools/test_netplay_campaign.py
@@ -47,5 +49,6 @@ docs/*
 !docs/RELEASE-v0.3.0.md
 !docs/RELEASE-v0.4.0.md
 !docs/RELEASE-v0.5.0.md
+!docs/RELEASE-v0.5.1.md
 !docs/VALIDATION.md
 !docs/THIRD_PARTY_NOTICES.txt

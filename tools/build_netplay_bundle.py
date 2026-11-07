@@ -5,8 +5,8 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-FILES = ('Host-Online.cmd', 'Join-Online.cmd', '온라인 시험판 사용법.txt',
-         'tools/netplay_launcher.py', 'tools/netplay_game.py',
+FILES = ('Host-Online.cmd', 'Join-Online.cmd', 'Settings-Online.cmd', '온라인 시험판 사용법.txt',
+         'tools/netplay_launcher.py', 'tools/netplay_game.py', 'tools/netplay_config.py',
          'tools/netplay_campaign.py', 'tools/netplay_saves.py',
          'tools/netplay_stage.py', 'tools/netplay_recovery.py', 'tools/netplay_korean.py',
          'tools/netplay_protocol.py', 'tools/win32_debug.py',
