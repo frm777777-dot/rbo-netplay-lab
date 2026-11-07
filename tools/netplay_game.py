@@ -22,7 +22,7 @@ from win32_debug import Debugger
 ROOT = Path(__file__).resolve().parent.parent
 # +0x594 is the second record pointer in the +0x588, 8-byte-stride list
 # constructed at 0x422b29/0x422930 (the first pointer is +0x58c).
-POINTER_FIELDS = (0x64, 0x57c, 0x58c, 0x594, 0x5b8, 0x5c4, 0x5d0, 0x5dc, 0x5e8,
+POINTER_FIELDS = (0x64, 0x57c, 0x584, 0x58c, 0x594, 0x5b8, 0x5c4, 0x5d0, 0x5dc, 0x5e8,
                   0x76c, 0x770, 0x774, 0x790, 0x794, 0x798, 0x7f8, 0x7fc, 0x938)
 PRESENTATION_FIELDS = (0x2e8, 0x2f4, 0x3f4, 0x8d4, 0x8d8, 0x8dc)
 
@@ -75,16 +75,22 @@ def capture_state(debugger, raw_entities=None):
         require(rectangle_count <= 2, 'Unexpected rectangle count')
         rectangles = [debugger.read(struct.unpack_from('<I', blob, 0x7f8 + i * 4)[0], 8)
                       for i in range(rectangle_count)]
+        # 0x4229ef stores a command-record pointer at +0x584; 0x423686
+        # dereferences it via 0x423620. Compare record bytes, not heap addresses.
+        condition_pointer = struct.unpack_from('<I', blob, 0x584)[0]
+        condition_prefix = debugger.read(condition_pointer, 64) if condition_pointer else b''
         if raw_entities is not None:
             command_pointer = struct.unpack_from('<I', blob, 0x594)[0]
             raw_entities.append({'group': group, 'slot': slot, 'parent': parent, 'raw': blob.hex(),
                                  'rectangles': [record.hex() for record in rectangles],
+                                 'condition_prefix': condition_prefix.hex(),
                                  'command_prefix': debugger.read(command_pointer, 64).hex() if command_pointer else None})
         normalized = bytearray(blob)
         for offset in POINTER_FIELDS + PRESENTATION_FIELDS:
             normalized[offset:offset + 4] = b'\0' * 4
         digest.update(struct.pack('<IIi', group, slot, parent))
         digest.update(normalized)
+        digest.update(bytes([bool(condition_pointer)]) + condition_prefix)
         for record in rectangles:
             digest.update(record)
         positions.append([group, slot, *struct.unpack_from('<3I', blob, 0x98)])

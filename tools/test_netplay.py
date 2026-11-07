@@ -73,6 +73,56 @@ class NetworkTests(unittest.TestCase):
         self.assertIsNone(self.room.error)
         self.assertEqual(self.connect('host').slot, 0)
 
+    def test_host_checkpoint_is_delivered_to_every_player(self):
+        clients = self.ready_room()
+        checkpoint = {'format': 1, 'profile': 'a' * 32, 'revision': 1, 'files': {}}
+        def play(client):
+            for f in range(120):
+                client.exchange(256 if f == 10 else 0, None if not f else STATE,
+                                checkpoint=checkpoint if f == 5 and client.slot == 0 else None)
+            client.finish()
+            return client.received_checkpoint
+        with concurrent.futures.ThreadPoolExecutor(self.players) as pool:
+            self.assertEqual(list(pool.map(play, clients)), [checkpoint] * self.players)
+
+    def test_guest_cannot_publish_saves_or_system_keys(self):
+        clients = self.ready_room()
+        checkpoint = {'format': 1, 'profile': 'a' * 32, 'revision': 1, 'files': {}}
+        with self.assertRaisesRegex(ProtocolError, 'host'):
+            self.room.submit(1, {'type': 'input', 'frame': 0, 'input': 0, 'state': None, 'checkpoint': checkpoint})
+        with self.assertRaisesRegex(ProtocolError, 'host'):
+            self.room.submit(1, {'type': 'input', 'frame': 0, 'input': 0x100000, 'state': None})
+
+    def test_save_identity_and_revision_cannot_go_backwards(self):
+        self.ready_room()
+        baseline = {'format': 1, 'profile': 'a' * 32, 'revision': 10, 'files': {}}
+        self.room.checkpoint = baseline
+        for checkpoint in (dict(baseline, revision=9), dict(baseline),
+                           dict(baseline, profile='b' * 32, revision=11)):
+            with self.assertRaises(ProtocolError):
+                self.room.submit(0, {'type': 'input', 'frame': 0, 'input': 0,
+                                     'state': None, 'checkpoint': checkpoint})
+        self.assertEqual(self.room.expected[0], 0)
+
+    def test_diverging_frame_does_not_replace_verified_save(self):
+        clients = self.ready_room()
+        baseline = {'format': 1, 'profile': 'a' * 32, 'revision': 10, 'files': {}}
+        self.room.checkpoint = baseline
+        def play(client):
+            try:
+                for f in range(20):
+                    state = None if not f else ('c' * 64 if f == 5 and client.slot == 1 else STATE)
+                    client.exchange(0, state,
+                                    checkpoint=dict(baseline, revision=11) if f == 5 and client.slot == 0 else None,
+                                    detail={'scene': client.slot})
+            except ProtocolError as exc:
+                return str(exc)
+        with concurrent.futures.ThreadPoolExecutor(self.players) as pool:
+            errors = list(pool.map(play, clients))
+        self.assertTrue(all('diverged' in error for error in errors))
+        self.assertEqual(self.room.checkpoint, baseline)
+        self.assertEqual(self.room.failure_details['frame'], 5)
+
     def test_guest_cannot_claim_host(self):
         with self.assertRaisesRegex(ProtocolError, 'token'):
             self.connect('host', token='friends-secret')
@@ -104,7 +154,7 @@ class NetworkTests(unittest.TestCase):
 
     def test_out_of_range_input_rejected(self):
         client = self.ready_room()[0]
-        send(client.socket, {'type': 'input', 'frame': 0, 'input': 256, 'state': None})
+        send(client.socket, {'type': 'input', 'frame': 0, 'input': 512, 'state': None})
         for f in range(3):
             client.read_frame(f)
         with self.assertRaisesRegex(ProtocolError, 'value'):
@@ -209,6 +259,7 @@ class UnlimitedNetworkTests(unittest.TestCase):
                     thread = threading.Thread(target=server.serve)
                     thread.start()
                     clients = []
+                    checkpoint = {'format': 1, 'profile': 'a' * 32, 'revision': 1, 'files': {}}
                     try:
                         for slot in range(players):
                             clients.append(Client(server.address, 'host-secret' if slot == 0 else 'friends-secret',
@@ -221,14 +272,17 @@ class UnlimitedNetworkTests(unittest.TestCase):
                                 while True:
                                     if client.slot == stop_slot and count == 8500:
                                         client.finish()
-                                        return count
-                                    inputs = client.exchange(16, None if count == 0 else STATE)
+                                        return count, client.received_checkpoint
+                                    inputs = client.exchange(16, None if count == 0 else STATE,
+                                                             checkpoint=checkpoint if count == 8499 and client.slot == 0 else None)
                                     self.assertEqual(inputs, [16 if p < players else 0 for p in range(3)] if count >= 3 else [0, 0, 0])
                                     count += 1
                             except SessionEnded:
-                                return count
+                                return count, client.received_checkpoint
                         with concurrent.futures.ThreadPoolExecutor(players) as pool:
-                            counts = list(pool.map(play, clients))
+                            results = list(pool.map(play, clients))
+                        counts = [value[0] for value in results]
+                        self.assertTrue(all(value[1] == checkpoint for value in results), results)
                         self.assertEqual(counts[stop_slot], 8500)
                         self.assertTrue(all(count >= 8497 for count in counts), counts)
                         self.assertGreaterEqual(room.audit_count, 8497)

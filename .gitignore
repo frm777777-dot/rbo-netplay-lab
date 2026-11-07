@@ -11,6 +11,10 @@ tools/*
 !tools/netplay_protocol.py
 !tools/netplay_game.py
 !tools/netplay_launcher.py
+!tools/netplay_campaign.py
+!tools/netplay_saves.py
+!tools/test_netplay_campaign.py
+!tools/test_netplay_saves.py
 !tools/win32_debug.py
 !tools/build_netplay_bundle.py
 !tools/prepare_test_runtime.py
@@ -25,5 +29,6 @@ docs/*
 !docs/RELEASE-v0.1.0.md
 !docs/RELEASE-v0.2.0.md
 !docs/RELEASE-v0.3.0.md
+!docs/RELEASE-v0.4.0.md
 !docs/VALIDATION.md
 !docs/THIRD_PARTY_NOTICES.txt

@@ -1,8 +1,9 @@
-"""Host/join launcher for the limited two/three-player EX3 experiment."""
+"""Host/join launcher for the two/three-player native EX3 campaign."""
 import argparse
 import contextlib
 import hashlib
 import json
+import msvcrt
 import os
 from pathlib import Path
 import secrets
@@ -13,8 +14,9 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from netplay_game import run_game
+from netplay_campaign import run_campaign
 from netplay_protocol import Client, ProtocolError, Room, Server, fingerprint, require
+from netplay_saves import SaveStore, encode, validate, materialize
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -90,11 +92,13 @@ def main():
     parser.add_argument('--delay', type=int, default=3)
     parser.add_argument('--bind', default='0.0.0.0')
     parser.add_argument('--players', type=int, choices=(2, 3), help='Total players, including the host')
+    parser.add_argument('--saves-dir', type=Path, default=ROOT / 'saves', help='Online save root')
     args = parser.parse_args()
     require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
-    print('RBO 2~3인 온라인 실험판 v0.3.0 — 플레이 시간 제한 없음')
+    print('RBO 2~3인 온라인 실험판 v0.4.0 — 일반 진행 / 온라인 저장')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
-    print('캐릭터 선택·일반 스테이지 진행·세이브는 아직 지원하지 않습니다.\n')
+    print('공통 메뉴와 출발은 1P, 캐릭터 선택·생성과 전투는 각자 조작합니다.')
+    print('호스트가 전원 저장하고 친구 PC에도 사본을 보관합니다.\n')
     players = (args.players if args.players is not None else pick_players()) if args.mode == 'host' else None
     source = args.game or pick_game()
     print('게임 파일을 확인하고 있습니다…')
@@ -104,9 +108,23 @@ def main():
     logs = ROOT / 'logs' / f'{time.strftime("%Y%m%d-%H%M%S")}-{args.mode}-{os.getpid()}'
     logs.mkdir(parents=True, exist_ok=True)
     server = thread = client = None
+    save_store = checkpoint = None
+    save_lock = None
     result = None
     try:
         if args.mode == 'host':
+            save_store = SaveStore(args.saves_dir / 'host')
+            save_lock = (save_store.directory / 'session.lock').open('a+b')
+            if save_lock.tell() == 0:
+                save_lock.write(b'0'); save_lock.flush()
+            save_lock.seek(0)
+            try:
+                msvcrt.locking(save_lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                save_lock.close()
+                save_lock = None
+                raise ProtocolError('같은 저장 폴더를 사용하는 호스트가 이미 실행 중입니다.')
+            checkpoint = save_store.load()
             room = Room(secrets.token_urlsafe(18), secrets.token_urlsafe(24),
                         frames=args.frames, delay=args.delay, timeout=180, players=players)
             server = Server(room, (args.bind, args.port))
@@ -123,24 +141,48 @@ def main():
             print('호스트에 연결하고 있습니다…')
             client = Client((address, args.port), token, game_hash, timeout=180)
         print(f'내 캐릭터: {client.slot + 1}P / 내 키 설정: 로컬 1P')
-        print(f'로고·타이틀에서 약 30초 준비한 뒤, {client.players}명이 모두 준비되면 전투가 시작됩니다.')
+        print(f'{client.players}명이 연결될 때까지 기다린 뒤 함께 타이틀 화면을 엽니다.')
+        initial = client.ready(encode(checkpoint) if checkpoint is not None else None)
+        checkpoint = json.loads(initial)
+        validate(checkpoint)
+        if save_store is None:
+            save_store = SaveStore(args.saves_dir / 'replicas' / checkpoint['profile'])
+            save_store.commit(checkpoint)
+        materialize(checkpoint, directory / 'DATA/SaveData')
+        print(f'온라인 저장 폴더: {save_store.directory}')
+        print('1P가 타이틀에서 Z로 시작하고, 캐릭터 화면에서 모두 Z로 참가하세요.')
+        print('게임 자체의 저장 시점에 저장됩니다. 전투 도중의 위치를 재개하는 기능은 아닙니다.')
         print('게임 창에 포커스를 두고 조작하세요. 창을 닫으면 방 전체가 종료됩니다.')
         print('플레이 시간 제한 없이 진행합니다. 종료하려면 게임 창을 닫으세요.' if not client.frames
               else f'개발 검사: {client.frames}프레임 뒤 종료합니다.')
         with (logs / 'bridge.txt').open('w', encoding='utf-8') as diagnostic, contextlib.redirect_stdout(diagnostic):
-            result = run_game(directory, client, logs / 'frames.jsonl', seconds=None)
+            result = run_campaign(directory, client, logs / 'frames.jsonl', seconds=None,
+                                  checkpoint=checkpoint, save_store=save_store)
         (logs / 'result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
         print('시험 세션을 정상 종료했습니다.')
+        print(f'온라인 저장과 사본은 다음 실행에도 유지됩니다: {save_store.directory}')
     except Exception as error:
         (logs / 'result.json').write_text(json.dumps({'completed': False, 'error': str(error)}, ensure_ascii=False, indent=2), encoding='utf-8')
+        if save_store is not None:
+            print(f'마지막으로 확인된 저장본은 보관되어 있습니다: {save_store.directory}')
+        print(f'문제 확인용 기록: {logs}')
         raise
     finally:
-        if client:
-            client.close()
-        if server:
-            (logs / 'server.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in server.room.audit))
-            server.close()
-            thread.join(3)
+        try:
+            if client:
+                client.close()
+            if server:
+                (logs / 'server.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in server.room.audit))
+                if server.room.failure_details:
+                    (logs / 'divergence.json').write_text(json.dumps(server.room.failure_details, ensure_ascii=False, indent=2), encoding='utf-8')
+                if server.room.checkpoint is not None and save_store is not None:
+                    save_store.commit(server.room.checkpoint)
+        finally:
+            if server:
+                server.close()
+                thread.join(3)
+            if save_lock:
+                save_lock.close()
 
 
 if __name__ == '__main__':

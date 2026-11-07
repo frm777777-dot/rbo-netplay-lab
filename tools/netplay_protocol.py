@@ -9,8 +9,9 @@ import struct
 import threading
 import time
 
-VERSION = 'rbo-ex3-lab-3'
-MAX_MESSAGE = 16384
+VERSION = 'rbo-ex3-lab-4'
+MAX_MESSAGE = 768 * 1024
+MAX_INPUT = 0x3001ff  # nine native actions plus host F12/Escape
 EXPECTED_EXE = '05b14b047e49dabb026c96150f8d5aab497d20d9b2d52f5e59a8aef1af5b8dc0'
 
 
@@ -20,6 +21,9 @@ class ProtocolError(RuntimeError):
 
 class SessionEnded(ProtocolError):
     """An unlimited session was deliberately closed by a participant."""
+    def __init__(self, message, checkpoint=None):
+        super().__init__(message)
+        self.checkpoint = checkpoint
 
 
 def require(condition, message):
@@ -51,7 +55,14 @@ def receive(sock):
     if result.get('type') == 'error':
         raise ProtocolError(str(result.get('message', 'Session stopped')))
     if result.get('type') == 'ended':
-        raise SessionEnded(str(result.get('message', 'Session ended')))
+        checkpoint = result.get('checkpoint')
+        if checkpoint is not None:
+            from netplay_saves import validate
+            try:
+                validate(checkpoint)
+            except ValueError as exc:
+                raise ProtocolError(str(exc)) from exc
+        raise SessionEnded(str(result.get('message', 'Session ended')), checkpoint)
     return result
 
 
@@ -101,6 +112,8 @@ class Room:
         self.completed = set()
         self.audit = deque(maxlen=4096) if frames == 0 else []
         self.audit_count = 0
+        self.failure_details = None
+        self.checkpoint = None
 
     def stop(self, message):
         with self.condition:
@@ -132,7 +145,7 @@ class Room:
     def join(self, hello):
         require(set(hello) == {'type', 'version', 'token', 'role', 'game_hash'}, 'Invalid hello fields')
         require(hello['type'] == 'hello' and hello['version'] == VERSION,
-                'Protocol mismatch: update both host and guests to v0.3.0')
+                'Protocol mismatch: update both host and guests to v0.4.0')
         require(type(hello['token']) is str and type(hello['game_hash']) is str, 'Invalid hello values')
         require(hello['token'].isascii() and len(hello['token']) <= 128, 'Invalid room token')
         require(len(hello['game_hash']) == 64 and all(c in '0123456789abcdef' for c in hello['game_hash']), 'Invalid game hash')
@@ -164,7 +177,7 @@ class Room:
                     header = bytes.fromhex(message['header'])
                 except (ValueError, TypeError) as exc:
                     raise ProtocolError('Invalid initial state') from exc
-                require(len(header) == 0x1344, 'Invalid initial state length')
+                require(0 < len(header) <= 256 * 1024, 'Invalid initial state length')
                 self.header = header.hex()
             self.ready.add(slot)
             self.condition.notify_all()
@@ -173,22 +186,43 @@ class Room:
 
     def submit(self, slot, packet):
         # No client-supplied slot or three-player array is accepted, even if valid.
-        require(set(packet) == {'type', 'frame', 'input', 'state'}, 'Invalid input fields')
+        required = {'type', 'frame', 'input', 'state'}
+        require(required <= set(packet) <= required | {'checkpoint', 'detail'}, 'Invalid input fields')
         require(packet['type'] == 'input', 'Expected input')
         frame, value, state = packet['frame'], packet['input'], packet['state']
-        require(type(frame) is int and type(value) is int and 0 <= value <= 255, 'Invalid input value')
+        require(type(frame) is int and type(value) is int and 0 <= value <= MAX_INPUT and not value & ~MAX_INPUT, 'Invalid input value')
+        require(slot == 0 or value <= 0x1ff, 'Only the host may control system keys')
         require(state is None or (type(state) is str and len(state) == 64 and all(c in '0123456789abcdef' for c in state)), 'Invalid state digest')
         require((frame == 0) == (state is None), 'Missing state digest')
+        detail = packet.get('detail')
+        require(detail is None or (type(detail) is dict and len(json.dumps(detail)) <= 4096), 'Invalid state detail')
+        checkpoint = packet.get('checkpoint')
+        if checkpoint is not None:
+            require(slot == 0, 'Only the host may publish a save')
+            from netplay_saves import validate
+            try:
+                validate(checkpoint)
+            except ValueError as exc:
+                raise ProtocolError(str(exc)) from exc
         with self.condition:
             require(slot in self.ready and len(self.ready) == self.players, 'Room is not ready')
             require(frame == self.expected[slot] and (not self.frames or frame < self.frames), 'Out-of-order input')
+            if checkpoint is not None and self.checkpoint is not None:
+                require(checkpoint['profile'] == self.checkpoint['profile'], 'Save profile changed')
+                require(checkpoint['revision'] > self.checkpoint['revision'], 'Save revision did not advance')
             self.expected[slot] += 1
-            entry = self.pending.setdefault(frame, {'inputs': {}, 'states': {}, 'readers': set()})
+            entry = self.pending.setdefault(frame, {'inputs': {}, 'states': {}, 'details': {}, 'checkpoint': None, 'readers': set()})
             entry['inputs'][slot] = value
             entry['states'][slot] = state
+            entry['details'][slot] = detail
+            if checkpoint is not None:
+                entry['checkpoint'] = checkpoint
             if len(entry['inputs']) == self.players:
                 if len(set(entry['states'].values())) != 1:
+                    self.failure_details = {'frame': frame, 'digests': entry['states'], 'players': entry['details']}
                     self.abort(f'Game state diverged at frame {frame}')
+                if entry['checkpoint'] is not None and not self.error:
+                    self.checkpoint = entry['checkpoint']
                 self.audit.append({'frame': frame, 'applied_frame': frame + self.delay,
                                    'inputs': [entry['inputs'].get(p, 0) for p in range(3)], 'state': state})
                 self.audit_count += 1
@@ -248,13 +282,21 @@ class Server:
             for frame in range(self.room.delay):
                 send(connection, {'type': 'frame', 'frame': frame, 'inputs': [0, 0, 0]})
             frame = 0
+            last_checkpoint = None
             while not self.room.frames or frame < self.room.frames:
                 packet = receive(connection)
                 if not self.room.frames and packet == {'type': 'stop'}:
                     self.room.stop(f'Player {slot + 1} ended the session')
                     raise SessionEnded(self.room.stop_reason)
                 inputs = self.room.submit(slot, packet)
-                send(connection, {'type': 'frame', 'frame': frame + self.room.delay, 'inputs': inputs})
+                response = {'type': 'frame', 'frame': frame + self.room.delay, 'inputs': inputs}
+                # Checkpoints are immutable and small. Repeat the latest until
+                # each connection has received it, without per-frame duplication.
+                latest = self.room.checkpoint
+                if latest is not None and latest is not last_checkpoint:
+                    response['checkpoint'] = latest
+                    last_checkpoint = latest
+                send(connection, response)
                 frame += 1
             require(receive(connection) == {'type': 'done'}, 'Missing completion packet')
             with self.room.condition:
@@ -264,7 +306,10 @@ class Server:
             send(connection, {'type': 'finished'})
         except SessionEnded as exc:
             try:
-                send(connection, {'type': 'ended', 'message': str(exc)})
+                response = {'type': 'ended', 'message': str(exc)}
+                if self.room.checkpoint is not None:
+                    response['checkpoint'] = self.room.checkpoint
+                send(connection, response)
                 connection.shutdown(socket.SHUT_WR)
                 connection.settimeout(1)
                 deadline = time.monotonic() + 1
@@ -293,8 +338,16 @@ class Server:
 
     def close(self):
         self.stopping.set()
-        self.room.abort('Server closed')
         self.socket.close()
+        if self.room.stop_reason and not self.room.error:
+            # The host launcher can finish before guests read the final packet.
+            # Let handlers deliver the stop/checkpoint and drain queued inputs
+            # before shutting their sockets down (avoids Windows RST).
+            deadline = time.monotonic() + 3
+            for thread in self.threads:
+                thread.join(timeout=max(0, deadline - time.monotonic()))
+        else:
+            self.room.abort('Server closed')
         with self.lock:
             for connection in self.connections:
                 try:
@@ -321,6 +374,7 @@ class Client:
             require(type(self.frames) is int and 0 <= self.frames <= 200000, 'Invalid frame count')
             require(type(self.delay) is int and 0 <= self.delay <= 12, 'Invalid delay')
             self.frame = 0
+            self.received_checkpoint = None
         except Exception:
             self.socket.close()
             raise
@@ -328,7 +382,7 @@ class Client:
     def ready(self, header=None):
         message = {'type': 'ready'}
         if self.slot == 0:
-            require(type(header) is bytes and len(header) == 0x1344, 'Host initial state required')
+            require(type(header) is bytes and 0 < len(header) <= 256 * 1024, 'Host initial state required')
             message['header'] = header.hex()
         send(self.socket, message)
         result = receive(self.socket)
@@ -337,20 +391,37 @@ class Client:
             header = bytes.fromhex(result['header'])
         except (ValueError, KeyError, TypeError) as exc:
             raise ProtocolError('Invalid initial state') from exc
-        require(len(header) == 0x1344, 'Invalid initial state')
+        require(0 < len(header) <= 256 * 1024, 'Invalid initial state')
         return header
 
     def read_frame(self, frame):
-        packet = receive(self.socket)
+        try:
+            packet = receive(self.socket)
+        except SessionEnded as exc:
+            if exc.checkpoint is not None:
+                self.received_checkpoint = exc.checkpoint
+            raise
         require(packet.get('type') == 'frame' and packet.get('frame') == frame, 'Unexpected server frame')
         inputs = packet.get('inputs')
-        require(type(inputs) is list and len(inputs) == 3 and all(type(v) is int and 0 <= v <= 255 for v in inputs), 'Invalid server inputs')
+        require(type(inputs) is list and len(inputs) == 3 and all(type(v) is int and 0 <= v <= MAX_INPUT and not v & ~MAX_INPUT for v in inputs), 'Invalid server inputs')
         require(all(value == 0 for value in inputs[self.players:]), 'Input for an inactive player')
+        if 'checkpoint' in packet:
+            from netplay_saves import validate
+            try:
+                validate(packet['checkpoint'])
+            except ValueError as exc:
+                raise ProtocolError(str(exc)) from exc
+            self.received_checkpoint = packet['checkpoint']
         return inputs
 
-    def exchange(self, local_input, state):
+    def exchange(self, local_input, state, *, checkpoint=None, detail=None):
         require(not self.frames or self.frame < self.frames, 'Frame limit reached')
-        send(self.socket, {'type': 'input', 'frame': self.frame, 'input': local_input, 'state': state})
+        packet = {'type': 'input', 'frame': self.frame, 'input': local_input, 'state': state}
+        if checkpoint is not None:
+            packet['checkpoint'] = checkpoint
+        if detail is not None:
+            packet['detail'] = detail
+        send(self.socket, packet)
         inputs = self.read_frame(self.frame)
         self.frame += 1
         return inputs
@@ -359,9 +430,10 @@ class Client:
         if not self.frames:
             send(self.socket, {'type': 'stop'})
             try:
+                frame = self.frame
                 while True:
-                    packet = receive(self.socket)
-                    require(packet.get('type') == 'frame', 'Unexpected stop response')
+                    self.read_frame(frame)
+                    frame += 1
             except SessionEnded:
                 return
         require(self.frame == self.frames, 'Game ended early')

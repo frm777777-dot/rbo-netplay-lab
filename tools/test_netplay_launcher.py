@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import socket
-import signal
 import subprocess
 import sys
 import time
@@ -37,7 +36,7 @@ def main():
             runtime = prepare(name)
             command = [sys.executable, '-u', '-X', 'utf8', '-B', str(ROOT / 'tools/netplay_launcher.py'),
                        'host' if index == 0 else 'join', '--game', runtime['directory'],
-                       '--port', str(port), '--bind', '127.0.0.1']
+                       '--port', str(port), '--bind', '127.0.0.1', '--saves-dir', str(output / f'saves-{index}')]
             if not args.unlimited:
                 command += ['--frames', '120']
             if index:
@@ -71,11 +70,18 @@ def main():
                     frame_log = new_logs[0] / 'frames.jsonl'
                     if frame_log.exists() and len(frame_log.read_text().splitlines()) >= 120:
                         bridge = (new_logs[0] / 'bridge.txt').read_text()
-                        ids = [int(line.split()[1]) for line in bridge.splitlines() if line.startswith('GAME_BRIDGE_READY ')]
+                        ids = [int(line.split()[1]) for line in bridge.splitlines() if line.startswith('CAMPAIGN_READY ')]
                         assert len(ids) == 1, ids
                         # Process-lifetime test for the native child this test
                         # started, identified by its own launcher's fresh log.
-                        os.kill(ids[0], signal.SIGTERM)
+                        from win32_debug import api, Close, Terminate, D, P, W, check
+                        open_process = api('OpenProcess', [D, W.BOOL, D], P)
+                        handle = open_process(1, False, ids[0])
+                        check(handle)
+                        try:
+                            check(Terminate(handle, 0))
+                        finally:
+                            Close(handle)
                         break
                 time.sleep(0.5)
             else:

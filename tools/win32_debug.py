@@ -45,6 +45,7 @@ SetContext=api('Wow64SetThreadContext',[P,C.POINTER(Context)])
 Flush=api('FlushInstructionCache',[P,P,C.c_size_t])
 Close=api('CloseHandle',[P])
 Terminate=api('TerminateProcess',[P,W.UINT])
+Allocate=api('VirtualAllocEx',[P,P,C.c_size_t,D,D],P)
 
 def check(ok):
     if not ok: raise C.WinError(C.get_last_error())
@@ -56,7 +57,7 @@ class Debugger:
         self.info=ProcessInfo(); startup=Startup(); startup.cb=C.sizeof(startup)
         command=C.create_unicode_buffer('"'+str(self.exe)+'" '+arguments)
         check(Create(str(self.exe),command,None,None,False,2,None,str(self.exe.parent),C.byref(startup),C.byref(self.info)))
-        self.handle=self.info.process; self.pid=self.info.pid; self.exited=False
+        self.handle=self.info.process; self.pid=self.info.pid; self.exited=False; self.exit_code=None
         self.threads[self.info.tid]=self.info.thread
 
     def read(self,address,size):
@@ -66,6 +67,10 @@ class Debugger:
         return b.raw
 
     def uint(self,address): return struct.unpack('<I',self.read(address,4))[0]
+    def allocate_data(self, size):
+        address = Allocate(self.handle, None, size, 0x3000, 0x04)
+        check(address)
+        return address
     def words(self,address,count): return list(struct.unpack('<'+'I'*count,self.read(address,4*count)))
     def write(self,address,data):
         b=C.create_string_buffer(data); n=C.c_size_t()
@@ -102,6 +107,7 @@ class Debugger:
                         if event.u.dll.file: Close(event.u.dll.file)
                     elif event.code==5:
                         self.exited=True
+                        self.exit_code=event.u.exit_code
                         print('PROCESS_EXIT',event.u.exit_code,flush=True)
                         return
                     elif event.code==1:
