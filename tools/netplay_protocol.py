@@ -8,7 +8,7 @@ import struct
 import threading
 import time
 
-VERSION = 'rbo-ex3-lab-1'
+VERSION = 'rbo-ex3-lab-2'
 MAX_MESSAGE = 16384
 EXPECTED_EXE = '05b14b047e49dabb026c96150f8d5aab497d20d9b2d52f5e59a8aef1af5b8dc0'
 
@@ -75,16 +75,18 @@ def fingerprint(directory):
 
 
 class Room:
-    """Exactly three authenticated connections, one immutable slot each."""
-    def __init__(self, token, host_token, frames=3600, delay=3, timeout=90):
+    """Two or three authenticated connections, one immutable slot each."""
+    def __init__(self, token, host_token, frames=3600, delay=3, timeout=90, players=3):
+        require(type(players) is int and players in (2, 3), 'Player count must be 2 or 3')
         require(type(frames) is int and 1 <= frames <= 200000, 'Invalid frame limit')
         require(type(delay) is int and 0 <= delay <= 12, 'Invalid input delay')
         require(bool(token) and bool(host_token) and token != host_token, 'Use distinct room and host tokens')
         self.token, self.host_token = token, host_token
+        self.players = players
         self.frames, self.delay, self.timeout = frames, delay, timeout
         self.condition = threading.Condition()
         self.members, self.ready, self.pending = {}, set(), {}
-        self.expected = [0, 0, 0]
+        self.expected = [0] * players
         self.game_hash = None
         self.header = None
         self.error = None
@@ -111,7 +113,8 @@ class Room:
 
     def join(self, hello):
         require(set(hello) == {'type', 'version', 'token', 'role', 'game_hash'}, 'Invalid hello fields')
-        require(hello['type'] == 'hello' and hello['version'] == VERSION, 'Protocol mismatch')
+        require(hello['type'] == 'hello' and hello['version'] == VERSION,
+                'Protocol mismatch: update both host and guests to v0.2.0 or newer')
         require(type(hello['token']) is str and type(hello['game_hash']) is str, 'Invalid hello values')
         require(hello['token'].isascii() and len(hello['token']) <= 128, 'Invalid room token')
         require(len(hello['game_hash']) == 64 and all(c in '0123456789abcdef' for c in hello['game_hash']), 'Invalid game hash')
@@ -124,7 +127,7 @@ class Room:
                 require(0 not in self.members, 'Host already connected')
                 slot = 0
             else:
-                available = [n for n in (1, 2) if n not in self.members]
+                available = [n for n in range(1, self.players) if n not in self.members]
                 require(bool(available), 'Room is full')
                 slot = available[0]
             require(self.game_hash in (None, hello['game_hash']), 'Game files differ')
@@ -147,7 +150,7 @@ class Room:
                 self.header = header.hex()
             self.ready.add(slot)
             self.condition.notify_all()
-            self.wait(lambda: len(self.ready) == 3)
+            self.wait(lambda: len(self.ready) == self.players)
             return self.header
 
     def submit(self, slot, packet):
@@ -159,22 +162,22 @@ class Room:
         require(state is None or (type(state) is str and len(state) == 64 and all(c in '0123456789abcdef' for c in state)), 'Invalid state digest')
         require((frame == 0) == (state is None), 'Missing state digest')
         with self.condition:
-            require(slot in self.ready and len(self.ready) == 3, 'Room is not ready')
+            require(slot in self.ready and len(self.ready) == self.players, 'Room is not ready')
             require(frame == self.expected[slot] and frame < self.frames, 'Out-of-order input')
             self.expected[slot] += 1
             entry = self.pending.setdefault(frame, {'inputs': {}, 'states': {}, 'readers': set()})
             entry['inputs'][slot] = value
             entry['states'][slot] = state
-            if len(entry['inputs']) == 3:
+            if len(entry['inputs']) == self.players:
                 if len(set(entry['states'].values())) != 1:
                     self.abort(f'Game state diverged at frame {frame}')
                 self.audit.append({'frame': frame, 'applied_frame': frame + self.delay,
-                                   'inputs': [entry['inputs'][p] for p in range(3)], 'state': state})
+                                   'inputs': [entry['inputs'].get(p, 0) for p in range(3)], 'state': state})
                 self.condition.notify_all()
-            self.wait(lambda: len(entry['inputs']) == 3)
-            result = [entry['inputs'][p] for p in range(3)]
+            self.wait(lambda: len(entry['inputs']) == self.players)
+            result = [entry['inputs'].get(p, 0) for p in range(3)]
             entry['readers'].add(slot)
-            if len(entry['readers']) == 3:
+            if len(entry['readers']) == self.players:
                 del self.pending[frame]
             return result
 
@@ -219,7 +222,8 @@ class Server:
             connection.settimeout(10)
             slot = self.room.join(receive(connection))
             connection.settimeout(self.room.timeout)
-            send(connection, {'type': 'welcome', 'slot': slot, 'frames': self.room.frames, 'delay': self.room.delay})
+            send(connection, {'type': 'welcome', 'slot': slot, 'players': self.room.players,
+                              'frames': self.room.frames, 'delay': self.room.delay})
             header = self.room.prepare(slot, receive(connection))
             send(connection, {'type': 'start', 'header': header})
             for frame in range(self.room.delay):
@@ -231,7 +235,7 @@ class Server:
             with self.room.condition:
                 self.room.completed.add(slot)
                 self.room.condition.notify_all()
-                self.room.wait(lambda: len(self.room.completed) == 3)
+                self.room.wait(lambda: len(self.room.completed) == self.room.players)
             send(connection, {'type': 'finished'})
         except (OSError, ProtocolError) as exc:
             if slot is not None:
@@ -276,7 +280,9 @@ class Client:
             message = receive(self.socket)
             require(message.get('type') == 'welcome', 'Expected welcome')
             self.slot, self.frames, self.delay = message['slot'], message['frames'], message['delay']
-            require(type(self.slot) is int and 0 <= self.slot < 3, 'Invalid assigned slot')
+            self.players = message.get('players')
+            require(type(self.players) is int and self.players in (2, 3), 'Invalid player count')
+            require(type(self.slot) is int and 0 <= self.slot < self.players, 'Invalid assigned slot')
             require(type(self.frames) is int and 1 <= self.frames <= 200000, 'Invalid frame count')
             require(type(self.delay) is int and 0 <= self.delay <= 12, 'Invalid delay')
             self.frame = 0
@@ -304,6 +310,7 @@ class Client:
         require(packet.get('type') == 'frame' and packet.get('frame') == frame, 'Unexpected server frame')
         inputs = packet.get('inputs')
         require(type(inputs) is list and len(inputs) == 3 and all(type(v) is int and 0 <= v <= 255 for v in inputs), 'Invalid server inputs')
+        require(all(value == 0 for value in inputs[self.players:]), 'Input for an inactive player')
         return inputs
 
     def exchange(self, local_input, state):

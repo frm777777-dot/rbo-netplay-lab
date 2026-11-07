@@ -1,4 +1,4 @@
-"""Run three real EX3 processes through the TCP room and compare every frame."""
+"""Run two or three real EX3 processes through TCP and compare every frame."""
 import argparse
 import json
 from pathlib import Path
@@ -23,17 +23,20 @@ def main():
     parser.add_argument('--perturb-state', action='store_true')
     parser.add_argument('--live', action='store_true')
     parser.add_argument('--keyboard-test', action='store_true')
+    parser.add_argument('--players', type=int, choices=(2, 3), default=3)
+    parser.add_argument('--dump-from', type=int)
     args = parser.parse_args()
     output = ROOT / 'analysis' / args.tag
     output.mkdir(parents=True, exist_ok=False)
-    room = Room(secrets.token_urlsafe(24), secrets.token_urlsafe(24), frames=args.frames, delay=args.delay, timeout=60)
+    room = Room(secrets.token_urlsafe(24), secrets.token_urlsafe(24), frames=args.frames, delay=args.delay, timeout=60, players=args.players)
     server = Server(room, ('127.0.0.1', 0))
     thread = threading.Thread(target=server.serve)
     thread.start()
     processes, logs = [], []
     started = time.monotonic()
     try:
-        for index, name in enumerate(('A', 'B', 'C')):
+        names = ('A', 'B', 'C')[:args.players]
+        for index, name in enumerate(names):
             runtime = prepare(name)
             token_file = output / f'{name}.token'
             token_file.write_text(room.host_token if index == 0 else room.token)
@@ -45,9 +48,11 @@ def main():
                 command.append('--keyboard-test')
             elif not args.live:
                 command.append('--scripted')
+            if args.dump_from is not None:
+                command += ['--dump-from', str(args.dump_from)]
             if index == 0:
                 command.append('--host')
-            if args.perturb_state and index == 2:
+            if args.perturb_state and index == args.players - 1:
                 command.append('--perturb-state')
             log = (output / f'{name}.txt').open('w', encoding='utf-8')
             logs.append(log)
@@ -62,32 +67,37 @@ def main():
         result = {'exit_codes': codes, 'error': room.error, 'completed_slots': sorted(room.completed),
                   'server_frames': len(room.audit), 'elapsed': round(time.monotonic() - started, 2),
                   'delay': args.delay, 'negative_control': args.perturb_state,
-                  'live_keyboard': args.live, 'keyboard_buffer_test': args.keyboard_test}
+                  'live_keyboard': args.live, 'keyboard_buffer_test': args.keyboard_test, 'players': args.players}
         (output / 'server.jsonl').write_text(''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in room.audit))
-        rows = [[json.loads(line) for line in (output / f'{name}.jsonl').read_text().splitlines()] for name in ('A', 'B', 'C')]
+        rows = [[json.loads(line) for line in (output / f'{name}.jsonl').read_text().splitlines()] for name in names]
         result['counts'] = [len(r) for r in rows]
         result['assigned_slots'] = [r[0]['slot'] if r else None for r in rows]
-        if not args.perturb_state and codes == [0, 0, 0]:
-            assert result['counts'] == [args.frames] * 3
-            assert set(result['assigned_slots']) == {0, 1, 2}
+        if not args.perturb_state and codes == [0] * args.players:
+            assert result['counts'] == [args.frames] * args.players
+            assert set(result['assigned_slots']) == set(range(args.players))
             differences = {key: [] for key in ('inputs', 'state')}
             for frame, copies in enumerate(zip(*rows)):
                 for key in differences:
-                    if not copies[0][key] == copies[1][key] == copies[2][key]:
+                    if not all(copy[key] == copies[0][key] for copy in copies):
                         differences[key].append(frame)
                 expected = [0, 0, 0]
                 if frame >= args.delay:
                     for records in rows:
                         expected[records[0]['slot']] = records[frame - args.delay]['local_input']
                 assert copies[0]['inputs'] == expected, (frame, expected, copies[0]['inputs'])
+                if copies[0]['state']:
+                    jobs = copies[0]['state']['jobs']
+                    assert all(job >= 0 for job in jobs[:args.players])
+                    assert all(job == -1 for job in jobs[args.players:]), jobs
             result['mismatches'] = {key: len(values) for key, values in differences.items()}
             result['entity_records_per_client'] = sum(r['state']['entities'] for r in rows[0] if r['state'])
             result['input_routing_verified'] = True
+            result['active_character_count_verified'] = args.players
             result['controlled_key_isolation_sequence_verified'] = not args.live and args.frames >= 1920 + args.delay
             result['nonzero_local_input_frames'] = [sum(r['local_input'] != 0 for r in records) for records in rows]
             if args.keyboard_test:
                 expected_nonzero = 240
-                assert result['nonzero_local_input_frames'] == [expected_nonzero] * 3, result
+                assert result['nonzero_local_input_frames'] == [expected_nonzero] * args.players, result
                 for records in rows:
                     for row in records:
                         phase = (row['frame'] - 1800) // 120
