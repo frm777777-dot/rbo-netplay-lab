@@ -79,9 +79,9 @@ class Debugger:
         self.write(address,b'\xcc')
 
     def run(self,on_create,seconds=120):
-        deadline=time.monotonic()+seconds
+        deadline=time.monotonic()+seconds if seconds is not None else None
         try:
-            while time.monotonic()<deadline:
+            while deadline is None or time.monotonic()<deadline:
                 event=Event()
                 if not Wait(C.byref(event),200):
                     err=C.get_last_error()

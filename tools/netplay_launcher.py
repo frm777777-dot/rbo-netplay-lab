@@ -86,13 +86,13 @@ def main():
     parser.add_argument('--game', type=Path)
     parser.add_argument('--address')
     parser.add_argument('--port', type=int, default=47624)
-    parser.add_argument('--frames', type=int, default=7200)
+    parser.add_argument('--frames', type=int, default=0, help='0 = no play-time limit (default); positive values are developer tests')
     parser.add_argument('--delay', type=int, default=3)
     parser.add_argument('--bind', default='0.0.0.0')
     parser.add_argument('--players', type=int, choices=(2, 3), help='Total players, including the host')
     args = parser.parse_args()
-    require(1 <= args.frames <= 7200, '이 실험판은 최대 7,200 프레임까지만 지원합니다.')
-    print('RBO 2~3인 온라인 실험판 v0.2.0 — 고정된 시험 스테이지')
+    require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
+    print('RBO 2~3인 온라인 실험판 v0.3.0 — 플레이 시간 제한 없음')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
     print('캐릭터 선택·일반 스테이지 진행·세이브는 아직 지원하지 않습니다.\n')
     players = (args.players if args.players is not None else pick_players()) if args.mode == 'host' else None
@@ -123,11 +123,12 @@ def main():
             print('호스트에 연결하고 있습니다…')
             client = Client((address, args.port), token, game_hash, timeout=180)
         print(f'내 캐릭터: {client.slot + 1}P / 내 키 설정: 로컬 1P')
-        print(f'{client.players}명이 준비되면 시작합니다. 시작 화면은 약 30초간 표시됩니다.')
+        print(f'로고·타이틀에서 약 30초 준비한 뒤, {client.players}명이 모두 준비되면 전투가 시작됩니다.')
         print('게임 창에 포커스를 두고 조작하세요. 창을 닫으면 방 전체가 종료됩니다.')
-        print('검증된 길이만 실행한 뒤 자동 종료됩니다. 시험판 설명서를 참고하세요.')
+        print('플레이 시간 제한 없이 진행합니다. 종료하려면 게임 창을 닫으세요.' if not client.frames
+              else f'개발 검사: {client.frames}프레임 뒤 종료합니다.')
         with (logs / 'bridge.txt').open('w', encoding='utf-8') as diagnostic, contextlib.redirect_stdout(diagnostic):
-            result = run_game(directory, client, logs / 'frames.jsonl', seconds=900)
+            result = run_game(directory, client, logs / 'frames.jsonl', seconds=None)
         (logs / 'result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
         print('시험 세션을 정상 종료했습니다.')
     except Exception as error:

@@ -8,13 +8,15 @@ from contextlib import nullcontext
 import gzip
 import hashlib
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import struct
 import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from netplay_protocol import Client, ProtocolError, fingerprint, require
+from netplay_protocol import Client, ProtocolError, SessionEnded, fingerprint, require
 from win32_debug import Debugger
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +25,25 @@ ROOT = Path(__file__).resolve().parent.parent
 POINTER_FIELDS = (0x64, 0x57c, 0x58c, 0x594, 0x5b8, 0x5c4, 0x5d0, 0x5dc, 0x5e8,
                   0x76c, 0x770, 0x774, 0x790, 0x794, 0x798, 0x7f8, 0x7fc, 0x938)
 PRESENTATION_FIELDS = (0x2e8, 0x2f4, 0x3f4, 0x8d4, 0x8d8, 0x8dc)
+
+
+class FrameLog:
+    """Bound production session logs to three files of at most 8 MiB each."""
+    def __init__(self, path, bounded):
+        self.handler = RotatingFileHandler(path, maxBytes=8 * 1024 * 1024 if bounded else 0,
+                                           backupCount=2, encoding='utf-8')
+
+    def write(self, text):
+        self.handler.emit(logging.LogRecord('frames', logging.INFO, '', 0, text.rstrip('\n'), (), None))
+
+    def flush(self):
+        self.handler.flush()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.handler.close()
 
 
 def capture_state(debugger, raw_entities=None):
@@ -93,7 +114,7 @@ def scripted_input(recording, frame, slot):
     return recording[source_frame * 3] if source_frame >= 0 and source_frame * 3 < len(recording) else 0
 
 
-def run_game(directory, client, log_path, scripted=False, seconds=600, perturb_state=False, keyboard_test=False, dump_from=None):
+def run_game(directory, client, log_path, scripted=False, seconds=None, perturb_state=False, keyboard_test=False, dump_from=None, stop_after=None, full_log=False):
     directory = Path(directory).resolve()
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,9 +125,10 @@ def run_game(directory, client, log_path, scripted=False, seconds=600, perturb_s
     started = time.monotonic()
     last_tick = started
     native_mapping = None
+    end_reason = 'Frame test completed' if client.frames else 'Game window closed'
     raw_capture = (gzip.open(log_path.with_suffix('.entities.jsonl.gz'), 'wt', encoding='utf-8', compresslevel=1)
                    if dump_from is not None else nullcontext())
-    with log_path.open('w', encoding='utf-8') as log, raw_capture as raw_log:
+    with FrameLog(log_path, bounded=not client.frames and not full_log) as log, raw_capture as raw_log:
         def test_keyboard_buffer(d, ctx):
             # Development-only injection into this owned game's DirectInput
             # sample, before its normal key-to-action mapper. No OS key events.
@@ -147,8 +169,7 @@ def run_game(directory, client, log_path, scripted=False, seconds=600, perturb_s
             nonlocal loaded, recording, last_tick
             require(not loaded, 'Stage transition is not supported in this experimental build')
             samples = d.uint(0xb064b0)
-            require(1 <= samples <= 216000 and client.frames + client.delay < samples,
-                    'Session exceeds the verified stage duration')
+            require(1 <= samples <= 216000, 'Invalid initial replay length')
             recording = d.read(0xb2968c, samples * 3)
             header = bytearray(d.read(0xb064d0, 0x1344))
             character = bytes(header[28:28 + 0x660])
@@ -176,9 +197,9 @@ def run_game(directory, client, log_path, scripted=False, seconds=600, perturb_s
             nonlocal frame, last_tick
             if not loaded:
                 return
-            if frame == client.frames:
+            if (client.frames and frame == client.frames) or (stop_after and frame == stop_after):
                 return False
-            require(d.uint(0xadeb2c) == 2 and d.uint(0xadeb28) == frame, 'Unexpected game tick')
+            require(d.uint(0xadeb2c) == 2 and d.uint(0xadeb28) == (1 if frame else 0), 'Unexpected game tick')
             raw_entities = [] if dump_from is not None and frame >= dump_from else None
             state = capture_state(d, raw_entities) if frame else None
             if raw_entities is not None:
@@ -193,9 +214,11 @@ def run_game(directory, client, log_path, scripted=False, seconds=600, perturb_s
             value = scripted_input(recording, frame, client.slot) if scripted else local_input
             inputs = client.exchange(value, digest)
             last_tick = time.monotonic()
-            # The existing replay input gate supplies all THREE network values
-            # before any player's simulation runs. It also covers setup tick 0.
-            d.write(0xb2968c + frame * 3, bytes(inputs))
+            # Replay cursor is only used by 0x438e80. Reuse the first three
+            # bytes each tick, so live play never runs beyond the replay array.
+            # Network frame numbers remain monotonic and independent of it.
+            d.write(0xadeb28, b'\0' * 4)
+            d.write(0xb2968c, bytes(inputs))
             row = {'frame': frame, 'slot': client.slot, 'local_input': value,
                    'native_local_input': local_input, 'inputs': inputs, 'state': state}
             log.write(json.dumps(row, separators=(',', ':')) + '\n')
@@ -209,6 +232,10 @@ def run_game(directory, client, log_path, scripted=False, seconds=600, perturb_s
             require(d.base == 0x400000, 'Unexpected image base')
             require(d.read(0x427900, 6) == bytes.fromhex('8b4424048b4c'), 'Unexpected notice function')
             d.write(0x427900, bytes.fromhex('b801000000c3'))
+            # The attract-mode timer starts at 10,800 and exits the demo.
+            # Disable only that expiry result; gameplay/end-state logic stays.
+            require(d.read(0x438fb0, 5) == bytes.fromhex('a1d07bbc00'), 'Unexpected demo timer function')
+            d.write(0x438fb0, bytes.fromhex('31c0c3'))
             # The polling return is before edge processing; preserve its 1P
             # result and clear local-only consumers before the next game tick.
             require(d.read(0x43d4cc, 1) == b'\xc3', 'Unexpected polling function')
@@ -219,11 +246,21 @@ def run_game(directory, client, log_path, scripted=False, seconds=600, perturb_s
             d.breakpoint(0x438e80, tick)
             print('GAME_BRIDGE_READY', d.pid, flush=True)
 
-        Debugger(directory / 'rbo_ex3.exe').run(created, seconds)
-    require(frame == client.frames, f'Game stopped early: {frame}/{client.frames}')
-    client.finish()
+        try:
+            Debugger(directory / 'rbo_ex3.exe').run(created, seconds)
+        except SessionEnded as exc:
+            require(not client.frames, 'Finite test ended unexpectedly')
+            end_reason = str(exc)
+        else:
+            if client.frames:
+                require(frame == client.frames, f'Game stopped early: {frame}/{client.frames}')
+            elif stop_after and frame == stop_after:
+                end_reason = 'Developer stop point reached'
+            elif seconds is not None and time.monotonic() - started >= seconds:
+                raise ProtocolError('Developer test deadline exceeded')
+            client.finish()
     return {'slot': client.slot, 'players': client.players, 'frames': frame, 'elapsed': round(time.monotonic() - started, 2),
-            'mapping': native_mapping, 'log': str(log_path)}
+            'mapping': native_mapping, 'log': str(log_path), 'unlimited': client.frames == 0, 'end_reason': end_reason}
 
 
 def main():
@@ -237,6 +274,8 @@ def main():
     parser.add_argument('--perturb-state', action='store_true')
     parser.add_argument('--keyboard-test', action='store_true')
     parser.add_argument('--dump-from', type=int, help='Developer capture: save raw entity records from this frame')
+    parser.add_argument('--stop-after', type=int, help='Developer only: close an unlimited game after this many frames')
+    parser.add_argument('--full-log', action='store_true', help='Developer only: retain the entire test log')
     parser.add_argument('--seconds', type=int, default=600)
     parser.add_argument('--log', type=Path, required=True)
     args = parser.parse_args()
@@ -245,7 +284,7 @@ def main():
     client = Client((args.server, args.port), token, game_hash, 'host' if args.host else 'guest')
     try:
         print('ASSIGNED_PLAYER', client.slot + 1, flush=True)
-        result = run_game(args.game, client, args.log, args.scripted, args.seconds, args.perturb_state, args.keyboard_test, args.dump_from)
+        result = run_game(args.game, client, args.log, args.scripted, args.seconds, args.perturb_state, args.keyboard_test, args.dump_from, args.stop_after, args.full_log)
         print('GAME_SESSION_COMPLETE', json.dumps(result), flush=True)
     finally:
         client.close()

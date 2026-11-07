@@ -9,7 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from netplay_protocol import Client, ProtocolError, Room, Server, VERSION, receive, send
+from netplay_protocol import Client, ProtocolError, SessionEnded, Room, Server, VERSION, receive, send
 
 GAME = 'a' * 64
 STATE = 'b' * 64
@@ -169,6 +169,88 @@ class TwoPlayerNetworkTests(NetworkTests):
         for value in (0, 1, 4, True, 2.0, '2'):
             with self.subTest(value=value), self.assertRaises(ProtocolError):
                 Room('friends-secret', 'host-secret', players=value)
+
+
+class UnlimitedNetworkTests(unittest.TestCase):
+    def test_unlimited_state_mismatch_is_not_a_normal_stop(self):
+        room = Room('friends-secret', 'host-secret', frames=0, players=2, timeout=3)
+        server = Server(room, ('127.0.0.1', 0))
+        thread = threading.Thread(target=server.serve)
+        thread.start()
+        clients = []
+        try:
+            clients = [Client(server.address, 'host-secret', GAME, 'host'),
+                       Client(server.address, 'friends-secret', GAME)]
+            def play(client):
+                client.ready(HEADER)
+                try:
+                    for frame in range(10):
+                        client.exchange(0, None if frame == 0 else (STATE if client.slot == 0 else 'c' * 64))
+                except ProtocolError as exc:
+                    self.assertNotIsInstance(exc, SessionEnded)
+                    return str(exc)
+            with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                errors = list(pool.map(play, clients))
+            self.assertTrue(all(error and 'diverged' in error for error in errors), errors)
+            self.assertIsNone(room.stop_reason)
+            self.assertIn('diverged', room.error)
+        finally:
+            for client in clients:
+                client.close()
+            server.close()
+            thread.join(2)
+
+    def test_unlimited_stream_and_any_player_stop(self):
+        for players in (2, 3):
+            for stop_slot in (0, players - 1):
+                with self.subTest(players=players, stop_slot=stop_slot):
+                    room = Room('friends-secret', 'host-secret', frames=0, players=players, timeout=5)
+                    server = Server(room, ('127.0.0.1', 0))
+                    thread = threading.Thread(target=server.serve)
+                    thread.start()
+                    clients = []
+                    try:
+                        for slot in range(players):
+                            clients.append(Client(server.address, 'host-secret' if slot == 0 else 'friends-secret',
+                                                  GAME, 'host' if slot == 0 else 'guest', timeout=6))
+                        def play(client):
+                            self.assertEqual(client.frames, 0)
+                            client.ready(HEADER)
+                            count = 0
+                            try:
+                                while True:
+                                    if client.slot == stop_slot and count == 8500:
+                                        client.finish()
+                                        return count
+                                    inputs = client.exchange(16, None if count == 0 else STATE)
+                                    self.assertEqual(inputs, [16 if p < players else 0 for p in range(3)] if count >= 3 else [0, 0, 0])
+                                    count += 1
+                            except SessionEnded:
+                                return count
+                        with concurrent.futures.ThreadPoolExecutor(players) as pool:
+                            counts = list(pool.map(play, clients))
+                        self.assertEqual(counts[stop_slot], 8500)
+                        self.assertTrue(all(count >= 8497 for count in counts), counts)
+                        self.assertGreaterEqual(room.audit_count, 8497)
+                        self.assertEqual(len(room.audit), 4096)
+                        self.assertLessEqual(len(room.pending), room.delay + 1)
+                        self.assertIn(f'Player {stop_slot + 1}', room.stop_reason)
+                        self.assertIsNone(room.error)
+                    finally:
+                        for client in clients:
+                            client.close()
+                        server.close()
+                        thread.join(2)
+
+    def test_unlimited_frame_numbers_pass_old_numeric_ceiling(self):
+        room = Room('friends-secret', 'host-secret', frames=0, players=2)
+        room.ready = {0, 1}
+        room.expected = [200001, 200001]
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            results = list(pool.map(lambda slot: room.submit(slot, {'type': 'input', 'frame': 200001,
+                                                                   'input': 16, 'state': STATE}), (0, 1)))
+        self.assertEqual(results, [[16, 16, 0]] * 2)
+        self.assertEqual(room.expected, [200002, 200002])
 
 
 if __name__ == '__main__':

@@ -25,10 +25,12 @@ def main():
     parser.add_argument('--keyboard-test', action='store_true')
     parser.add_argument('--players', type=int, choices=(2, 3), default=3)
     parser.add_argument('--dump-from', type=int)
+    parser.add_argument('--unlimited', action='store_true', help='Use an unlimited room; host closes at --frames')
+    parser.add_argument('--bounded-log', action='store_true', help='Exercise production log rotation')
     args = parser.parse_args()
     output = ROOT / 'analysis' / args.tag
     output.mkdir(parents=True, exist_ok=False)
-    room = Room(secrets.token_urlsafe(24), secrets.token_urlsafe(24), frames=args.frames, delay=args.delay, timeout=60, players=args.players)
+    room = Room(secrets.token_urlsafe(24), secrets.token_urlsafe(24), frames=0 if args.unlimited else args.frames, delay=args.delay, timeout=60, players=args.players)
     server = Server(room, ('127.0.0.1', 0))
     thread = threading.Thread(target=server.serve)
     thread.start()
@@ -52,6 +54,10 @@ def main():
                 command += ['--dump-from', str(args.dump_from)]
             if index == 0:
                 command.append('--host')
+                if args.unlimited:
+                    command += ['--stop-after', str(args.frames)]
+            if args.unlimited and not args.bounded_log:
+                command.append('--full-log')
             if args.perturb_state and index == args.players - 1:
                 command.append('--perturb-state')
             log = (output / f'{name}.txt').open('w', encoding='utf-8')
@@ -65,15 +71,32 @@ def main():
             time.sleep(1)
         codes = [p.returncode for p in processes]
         result = {'exit_codes': codes, 'error': room.error, 'completed_slots': sorted(room.completed),
-                  'server_frames': len(room.audit), 'elapsed': round(time.monotonic() - started, 2),
+                  'server_frames': room.audit_count, 'elapsed': round(time.monotonic() - started, 2),
+                  'unlimited': args.unlimited, 'stop_reason': room.stop_reason,
                   'delay': args.delay, 'negative_control': args.perturb_state,
                   'live_keyboard': args.live, 'keyboard_buffer_test': args.keyboard_test, 'players': args.players}
         (output / 'server.jsonl').write_text(''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in room.audit))
-        rows = [[json.loads(line) for line in (output / f'{name}.jsonl').read_text().splitlines()] for name in names]
+        rows = []
+        log_sizes = []
+        for name in names:
+            paths = [output / f'{name}.jsonl{suffix}' for suffix in ('.2', '.1', '')]
+            paths = [path for path in paths if path.exists()]
+            rows.append([json.loads(line) for path in paths for line in path.read_text().splitlines()])
+            log_sizes.append(sum(path.stat().st_size for path in paths))
+            if args.bounded_log:
+                assert all(path.stat().st_size <= 8 * 1024 * 1024 for path in paths)
+                assert len(paths) <= 3
+        result['retained_log_bytes'] = log_sizes
         result['counts'] = [len(r) for r in rows]
         result['assigned_slots'] = [r[0]['slot'] if r else None for r in rows]
         if not args.perturb_state and codes == [0] * args.players:
-            assert result['counts'] == [args.frames] * args.players
+            if args.unlimited:
+                assert result['counts'][0] == args.frames
+                assert min(result['counts']) >= args.frames - args.delay
+                assert max(result['counts']) <= args.frames + args.delay + 1
+                assert room.stop_reason == 'Player 1 ended the session'
+            else:
+                assert result['counts'] == [args.frames] * args.players
             assert set(result['assigned_slots']) == set(range(args.players))
             differences = {key: [] for key in ('inputs', 'state')}
             for frame, copies in enumerate(zip(*rows)):
