@@ -1,0 +1,9 @@
+{
+  "version": "3.14.10",
+  "url": "https://www.python.org/ftp/python/3.14.10/python-3.14.10-embed-amd64.zip",
+  "release_index": "https://www.python.org/downloads/windows/",
+  "archive_sha256": "90905e64a840557d8c1bc4f5b74db3d7ee85e3ffb217611cac1c7813acea4159",
+  "authenticode_status": "Valid",
+  "authenticode_signer": "Python Software Foundation",
+  "license": "python/LICENSE.txt"
+}

@@ -1,0 +1,21 @@
+Python runtime
+
+The Windows release ZIP includes the official Python Software Foundation
+Python 3.14.10 Windows embeddable package (64-bit).
+
+Source:
+https://www.python.org/ftp/python/3.14.10/python-3.14.10-embed-amd64.zip
+
+Original archive SHA-256:
+90905e64a840557d8c1bc4f5b74db3d7ee85e3ffb217611cac1c7813acea4159
+
+The original LICENSE.txt and other files provided in that package are retained
+under runtime/python in the release archive. Refer to runtime/python/LICENSE.txt
+for Python and included third-party component license terms.
+
+Ragnarok Battle Offline
+
+No RBO executable, PAC assets, installer, save files or extracted game data are
+included in the repository or release archive. Each participant supplies their
+own compatible game installation. This is an independent experimental project
+and is not an official RBO distribution or update.
