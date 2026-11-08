@@ -2,10 +2,12 @@
 import argparse
 import contextlib
 import hashlib
+import ipaddress
 import json
 import msvcrt
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import sys
@@ -20,6 +22,115 @@ from netplay_recovery import RecoveryClient as Client, RecoveryRoom as Room, Rec
 from netplay_saves import SaveStore, encode, validate, materialize
 
 ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PORT = 47624
+
+
+def host_address(value):
+    value = value.strip()
+    if not value or len(value) > 253:
+        raise ValueError('호스트의 IP 주소를 입력해주세요.')
+    if re.fullmatch(r'[0-9.]+', value):
+        try:
+            ipaddress.IPv4Address(value)
+        except ValueError:
+            raise ValueError('IP 주소를 확인해주세요. 예: 192.168.0.10') from None
+    elif not all(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', part)
+                 for part in value.rstrip('.').split('.')):
+        raise ValueError('IP 또는 호스트 이름만 입력해주세요. http://와 포트는 제외합니다.')
+    return value
+
+
+def port_number(value):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise ValueError('포트는 1~65535 사이의 숫자를 입력해주세요.') from None
+    if isinstance(value, bool) or not 1 <= port <= 65535:
+        raise ValueError('포트는 1~65535 사이의 숫자를 입력해주세요.')
+    return port
+
+
+def read_join_settings(path):
+    try:
+        if path.stat().st_size > 4096:
+            raise ValueError('설정 파일이 너무 큽니다.')
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(saved, dict) or not isinstance(saved.get('address'), str) or type(saved.get('port')) is not int:
+            raise ValueError('설정 형식이 다릅니다.')
+        return host_address(saved['address']), port_number(saved['port'])
+    except FileNotFoundError:
+        return '', DEFAULT_PORT
+    except (OSError, ValueError):
+        print('이전 접속 설정을 읽지 못했습니다. IP와 포트를 다시 입력해주세요.')
+        return '', DEFAULT_PORT
+
+
+def save_join_settings(path, address, port):
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                         prefix=path.name + '.', suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({'address': address, 'port': port}, stream, ensure_ascii=False, indent=2)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        print('접속 설정을 파일에 저장하지 못했습니다. 이번에는 입력한 값으로 접속합니다.')
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def pick_endpoint(path, address=None, port=None, defaults=None):
+    previous_address, previous_port = defaults or read_join_settings(path)
+    if address is None:
+        while True:
+            suffix = f' [{previous_address}] (Enter=유지)' if previous_address else ''
+            try:
+                address = host_address(input(f'호스트 IP / 주소{suffix}: ').strip() or previous_address)
+                break
+            except ValueError as error:
+                print(error)
+    else:
+        address = host_address(address)
+    if port is None:
+        while True:
+            try:
+                port = port_number(input(f'포트 [{previous_port}] (Enter=유지): ').strip() or previous_port)
+                break
+            except ValueError as error:
+                print(error)
+    else:
+        port = port_number(port)
+    save_join_settings(path, address, port)
+    return address, port
+
+
+def connect_guest(game_hash, path, address=None, port=None):
+    address, port = pick_endpoint(path, address, port)
+    token = input('방 코드: ').strip()
+    while True:
+        try:
+            print(f'호스트에 연결하고 있습니다… {address}:{port}')
+            return Client((address, port), token, game_hash, timeout=45)
+        except (OSError, ProtocolError) as error:
+            print(f'접속하지 못했습니다: {error}')
+            while True:
+                action = input('Enter=다시 시도 / 2=IP·포트·방 코드 수정 / 3=종료: ').strip()
+                if action in ('', '1', '2', '3'):
+                    break
+                print('Enter 또는 2, 3을 입력해주세요.')
+            if action == '3':
+                raise
+            if action == '2':
+                address, port = pick_endpoint(path, defaults=(address, port))
+                token = input('방 코드: ').strip()
 
 
 def isolated_game(source):
@@ -91,15 +202,18 @@ def main():
     parser.add_argument('mode', choices=('host', 'join'))
     parser.add_argument('--game', type=Path)
     parser.add_argument('--address')
-    parser.add_argument('--port', type=int, default=47624)
+    parser.add_argument('--port', type=port_number, help='TCP port (host default: 47624; join: last entered value)')
+    parser.add_argument('--join-settings', type=Path, default=ROOT / 'join-settings.json', help='Local saved join endpoint')
     parser.add_argument('--frames', type=int, default=0, help='0 = no play-time limit (default); positive values are developer tests')
     parser.add_argument('--delay', type=int, default=3)
     parser.add_argument('--bind', default='0.0.0.0')
     parser.add_argument('--players', type=int, choices=(2, 3), help='Total players, including the host')
     parser.add_argument('--saves-dir', type=Path, default=ROOT / 'saves', help='Online save root')
     args = parser.parse_args()
+    if args.mode == 'host' and args.port is None:
+        args.port = DEFAULT_PORT
     require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
-    print('RBO 2~3인 온라인 실험판 v0.5.1 — 자동 재접속 / 스테이지 복구 / 한글')
+    print('RBO 2~3인 온라인 실험판 v0.5.2 — 자동 재접속 / 스테이지 복구 / 한글')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
     print('공통 메뉴와 출발은 1P, 캐릭터 선택·생성과 전투는 각자 조작합니다.')
     print('호스트가 전원 저장하고 친구 PC에도 사본을 보관합니다.\n')
@@ -137,13 +251,10 @@ def main():
             client = Client(('127.0.0.1', args.port), room.host_token, game_hash, 'host', timeout=45)
             print(f'서버 포트: TCP {args.port}')
             print(f'친구에게 전달할 방 코드: {room.token}')
-            print('친구는 Join-Online.cmd에서 이 PC의 접속 주소와 방 코드를 입력합니다.')
+            print('친구는 Join-Online.cmd에서 이 PC의 접속 주소·포트·방 코드를 입력합니다.')
             print('외부 인터넷 접속에는 공유기의 포트 연결과 방화벽 허용이 필요합니다.')
         else:
-            address = args.address or input('호스트 PC 주소: ').strip()
-            token = input('방 코드: ').strip()
-            print('호스트에 연결하고 있습니다…')
-            client = Client((address, args.port), token, game_hash, timeout=45)
+            client = connect_guest(game_hash, args.join_settings, args.address, args.port)
         print(f'내 캐릭터: {client.slot + 1}P / 내 키 설정: 로컬 1P')
         print(f'{client.players}명이 연결될 때까지 기다린 뒤 함께 타이틀 화면을 엽니다.')
         initial_header = encode(checkpoint) if checkpoint is not None else None
@@ -215,6 +326,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (OSError, ProtocolError, ValueError, KeyboardInterrupt) as error:
+    except (OSError, ProtocolError, ValueError, EOFError, KeyboardInterrupt) as error:
         print(f'\n세션을 종료했습니다: {error}')
         raise SystemExit(1)

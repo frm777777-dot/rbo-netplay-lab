@@ -37,6 +37,7 @@ def main():
             command = [sys.executable, '-u', '-X', 'utf8', '-B', str(ROOT / 'tools/netplay_launcher.py'),
                        'host' if index == 0 else 'join', '--game', runtime['directory'],
                        '--port', str(port), '--bind', '127.0.0.1', '--saves-dir', str(output / f'saves-{index}')]
+            command += ['--join-settings', str(output / f'join-settings-{index}.json')]
             if not args.unlimited:
                 command += ['--frames', '120']
             if index:
