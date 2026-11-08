@@ -20,6 +20,7 @@ from netplay_campaign import run_campaign
 from netplay_protocol import ProtocolError, RecoveryNeeded, TransportError, GameCrashed, fingerprint, require
 from netplay_transport import RecoveryClient as Client, RecoveryRoom as Room, RecoveryServer as Server
 from netplay_saves import SaveStore, encode, validate, materialize
+from game_settings import pick_game
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 47624
@@ -181,18 +182,6 @@ def isolated_game(source):
     return target
 
 
-def pick_game():
-    default = ROOT / 'runtime/app'
-    if (default / 'rbo_ex3.exe').is_file():
-        return default
-    text = input('일본어판 rbo_ex3.exe와 DATA가 들어 있는 폴더 경로: ').strip().strip('"')
-    source = Path(text)
-    if source.name.lower() == 'rbo_ex3.exe':
-        source = source.parent
-    require((source / 'rbo_ex3.exe').is_file(), '해당 폴더에 rbo_ex3.exe가 없습니다.')
-    return source
-
-
 def pick_players():
     while True:
         value = input('플레이 인원 (본인 포함 2 또는 3, Enter=2): ').strip()
@@ -217,7 +206,7 @@ def main():
     if args.mode == 'host' and args.port is None:
         args.port = DEFAULT_PORT
     require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
-    print('RBO 2~3인 온라인 실험판 v0.6.0 — 연결 유지 복구·공격 동기화 / 한글')
+    print('RBO 2~3인 온라인 실험판 v0.6.1 — 게임 폴더 기억 / 연결 유지 복구·한글')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
     print('공통 메뉴와 출발은 1P, 캐릭터 선택·생성과 전투는 각자 조작합니다.')
     print('호스트가 전원 저장하고 친구 PC에도 사본을 보관합니다.\n')

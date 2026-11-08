@@ -8,12 +8,15 @@
 !Settings-Online.cmd
 !Single-Korean.cmd
 !Launch-RBO.cmd
+!Select-Game.cmd
 !온라인 시험판 사용법.txt
 !tools/
 tools/*
 !tools/netplay_protocol.py
 !tools/netplay_game.py
 !tools/netplay_launcher.py
+!tools/game_settings.py
+!tools/test_game_settings.py
 !tools/netplay_config.py
 !tools/singleplayer.py
 !tools/test_singleplayer.py
@@ -65,5 +68,6 @@ docs/*
 !docs/RELEASE-v0.5.3.md
 !docs/RELEASE-v0.5.4.md
 !docs/RELEASE-v0.6.0.md
+!docs/RELEASE-v0.6.1.md
 !docs/VALIDATION.md
 !docs/THIRD_PARTY_NOTICES.txt
