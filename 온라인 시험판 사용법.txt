@@ -1,8 +1,11 @@
-RBO 한글 싱글·2~3인 온라인 실험판 v0.5.3
+RBO 한글 싱글·2~3인 온라인 실험판 v0.5.4
 
 호스트 PC가 서버를 실행합니다. 친구 1명 또는 2명과 플레이할 수 있습니다.
-v0.5.3을 권장합니다. 게임 원본은 따로 준비해야 합니다.
-온라인은 v0.5.1·v0.5.2와 함께 접속할 수 있으며 v0.5.0 이하는 연결되지 않습니다. 아직 시험판입니다.
+호스트와 친구 모두 v0.5.4로 업데이트하세요. 게임 원본은 따로 준비해야 합니다.
+활 공격 뒤 내부 자료 주소 차이 때문에 복구가 반복되던 문제를 수정했습니다.
+상태 비교 방식이 달라져 v0.5.3 이하와는 연결되지 않습니다. 아직 시험판입니다.
+실행기와 게임을 종료한 뒤 기존 실행기 폴더에 새 파일을 덮어쓰세요.
+saves 폴더와 join-settings.json은 보존하세요. 싱글·온라인 저장 형식과 위치는 유지됩니다.
 
 한글 싱글플레이
 Single-Korean.cmd를 실행하세요. 기존 Launch-RBO.cmd도 같은 한글 싱글로 실행됩니다.
@@ -127,5 +130,5 @@ Python은 패키지에 포함되어 있습니다. 라이선스: runtime\python\L
 공식 RBO 프로젝트와는 별개의 실험 도구입니다.
 
 다운로드와 상세 기록:
-https://github.com/frm777777-dot/rbo-netplay-lab/releases/tag/v0.5.3
+https://github.com/frm777777-dot/rbo-netplay-lab/releases/tag/v0.5.4
 https://github.com/frm777777-dot/rbo-netplay-lab/blob/main/docs/VALIDATION.md

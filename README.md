@@ -1,12 +1,12 @@
 # RBO Netplay Lab
 
-**[Windows 시험판 v0.5.3 다운로드](https://github.com/frm777777-dot/rbo-netplay-lab/releases/download/v0.5.3/RBO-Netplay-Lab.zip)** · [릴리스 안내](https://github.com/frm777777-dot/rbo-netplay-lab/releases/tag/v0.5.3)
+**[Windows 시험판 v0.5.4 다운로드](https://github.com/frm777777-dot/rbo-netplay-lab/releases/download/v0.5.4/RBO-Netplay-Lab.zip)** · [릴리스 안내](https://github.com/frm777777-dot/rbo-netplay-lab/releases/tag/v0.5.4)
 
 Ragnarok Battle Offline EX3를 **한글로 혼자 플레이**하거나 **호스트 1명 + 친구 1~2명**이 각자 PC에서 실행하는 실험판입니다. 온라인에서는 호스트 PC가 서버 역할을 하므로 별도 유료 서버나 화면 전송 서비스가 필요하지 않습니다.
 
 v0.5.0은 **자동 재접속·스테이지 시작 지점 복구와 플레이 UI·대사 한글화**를 추가합니다. 캐릭터 선택·생성, 1스테이지부터의 일반 진행, 호스트의 전원 저장과 친구 PC의 사본 보관을 지원합니다. 공통 메뉴와 출발은 1P가 조작하고, 각자 자신의 캐릭터를 선택하고 움직입니다. 게임의 원래 저장 시점을 사용하며, 전투 도중의 위치를 그대로 재개하는 기능은 아닙니다.
 
-**v0.5.3을 권장합니다.** 온라인은 v0.5.1·v0.5.2와 함께 접속할 수 있으며 v0.5.0 이하와는 연결되지 않습니다. 아직 시험판이며 모든 스테이지와 서로 다른 PC의 장시간 진행을 검증한 것은 아닙니다.
+**호스트와 친구 모두 v0.5.4로 업데이트하세요.** 활 공격 후 PC마다 다른 내부 자료 주소를 진행 차이로 판정해 복구가 반복되던 오류를 수정했습니다. 상태 비교 방식이 달라 v0.5.3 이하와는 연결되지 않습니다. 아직 시험판이며 모든 스테이지와 서로 다른 PC의 장시간 진행을 검증한 것은 아닙니다.
 
 v0.5.1은 **한글 EX3 설정 프로그램**과 각 PC의 화면·소리·화질 설정 반영을 추가합니다.
 

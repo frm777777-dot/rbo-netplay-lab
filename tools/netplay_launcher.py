@@ -213,7 +213,7 @@ def main():
     if args.mode == 'host' and args.port is None:
         args.port = DEFAULT_PORT
     require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
-    print('RBO 2~3인 온라인 실험판 v0.5.3 — 자동 재접속 / 스테이지 복구 / 한글')
+    print('RBO 2~3인 온라인 실험판 v0.5.4 — 활 공격 동기화 보정 / 한글')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
     print('공통 메뉴와 출발은 1P, 캐릭터 선택·생성과 전투는 각자 조작합니다.')
     print('호스트가 전원 저장하고 친구 PC에도 사본을 보관합니다.\n')

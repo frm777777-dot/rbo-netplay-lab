@@ -20,11 +20,33 @@ from netplay_protocol import Client, ProtocolError, SessionEnded, fingerprint, r
 from win32_debug import Debugger
 
 ROOT = Path(__file__).resolve().parent.parent
-# +0x594 is the second record pointer in the +0x588, 8-byte-stride list
-# constructed at 0x422b29/0x422930 (the first pointer is +0x58c).
+# 0x422b29/0x422930 build 35 eight-byte command nodes at +0x588.
+# Each node is (next node, command data); +0x6a0..+0x6c8 hold six list heads.
+# Data pointers can be unaligned and vary between processes, including +0x59c
+# when a bow hit uses the third node. Compare active records below instead.
+COMMAND_POINTER_FIELDS = tuple(range(0x58c, 0x6a0, 8))
 POINTER_FIELDS = (0x64, 0x57c, 0x584, 0x58c, 0x594, 0x5b8, 0x5c4, 0x5d0, 0x5dc, 0x5e8,
                   0x76c, 0x770, 0x774, 0x790, 0x794, 0x798, 0x7f8, 0x7fc, 0x938)
 PRESENTATION_FIELDS = (0x2e8, 0x2f4, 0x3f4, 0x8d4, 0x8d8, 0x8dc)
+
+
+def capture_commands(debugger, node, blob, cache):
+    """Compare bounded active command prefixes and their native list order."""
+    records, seen = [], set()
+    for head in range(0x6a0, 0x6d0, 8):
+        current = struct.unpack_from('<I', blob, head)[0]
+        while current:
+            offset = current - node
+            require(0x588 <= offset < 0x6a0 and (offset - 0x588) % 8 == 0,
+                    'Unexpected command node layout')
+            require(offset not in seen, 'Repeated command node')
+            seen.add(offset)
+            current, pointer = struct.unpack_from('<2I', blob, offset)
+            require(pointer != 0, 'Missing active command data')
+            if pointer not in cache:
+                cache[pointer] = debugger.read(pointer, 64)
+            records.append((head, offset, cache[pointer]))
+    return records
 
 
 class FrameLog:
@@ -51,8 +73,9 @@ def capture_state(debugger, raw_entities=None):
 
     All active entity bytes except identified address/presentation words;
     includes positions, links, child lists, character records and all RNG streams.
-    The two rectangle records referenced at +0x7f8/+0x7fc are also compared.
-    Other pointed-to allocations and unlisted globals are outside this check.
+    The two rectangle records referenced at +0x7f8/+0x7fc and 64-byte prefixes
+    of active command records are also compared. Complete variable-length
+    commands, other pointed-to allocations and unlisted globals are outside it.
     """
     digest = hashlib.sha256()
     characters = debugger.read(0x25109c8, 0x660 * 3)
@@ -61,6 +84,7 @@ def capture_state(debugger, raw_entities=None):
     digest.update(rng)
     seen = set()
     positions = []
+    command_cache = {}
 
     def capture(node, group, parent=-1):
         require(node not in seen, 'Repeated entity')
@@ -79,18 +103,21 @@ def capture_state(debugger, raw_entities=None):
         # dereferences it via 0x423620. Compare record bytes, not heap addresses.
         condition_pointer = struct.unpack_from('<I', blob, 0x584)[0]
         condition_prefix = debugger.read(condition_pointer, 64) if condition_pointer else b''
+        commands = capture_commands(debugger, node, blob, command_cache)
         if raw_entities is not None:
-            command_pointer = struct.unpack_from('<I', blob, 0x594)[0]
             raw_entities.append({'group': group, 'slot': slot, 'parent': parent, 'raw': blob.hex(),
                                  'rectangles': [record.hex() for record in rectangles],
                                  'condition_prefix': condition_prefix.hex(),
-                                 'command_prefix': debugger.read(command_pointer, 64).hex() if command_pointer else None})
+                                 'commands': [[head, offset, prefix.hex()] for head, offset, prefix in commands]})
         normalized = bytearray(blob)
-        for offset in POINTER_FIELDS + PRESENTATION_FIELDS:
+        for offset in POINTER_FIELDS + PRESENTATION_FIELDS + COMMAND_POINTER_FIELDS:
             normalized[offset:offset + 4] = b'\0' * 4
         digest.update(struct.pack('<IIi', group, slot, parent))
         digest.update(normalized)
         digest.update(bytes([bool(condition_pointer)]) + condition_prefix)
+        digest.update(struct.pack('<I', len(commands)))
+        for head, offset, prefix in commands:
+            digest.update(struct.pack('<II', head, offset) + prefix)
         for record in rectangles:
             digest.update(record)
         positions.append([group, slot, *struct.unpack_from('<3I', blob, 0x98)])
