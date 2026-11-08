@@ -71,14 +71,15 @@ def install(source, target):
     (output / 'manifest.json').write_text(json.dumps({'pack': pack_hash(), 'assets': sorted(pack['assets'])}), encoding='ascii')
 
 
-def attach(debugger, directory):
+def attach(debugger, directory, *, title='RBO EX3 - Korean Online'):
     """Redirect game-owned resource opens to localized copies of the same asset."""
     manifest = Path(directory) / 'korean/manifest.json'
     if not manifest.is_file():
         return
     assets = set(json.loads(manifest.read_bytes())['assets'])
+    require(title.isascii() and len(title) < 40, 'Invalid game window title')
     for address in (0x497518, 0x497540):
-        debugger.write(address, b'RBO EX3 - Korean Online\0'.ljust(40, b'\0'))
+        debugger.write(address, (title.encode('ascii') + b'\0').ljust(40, b'\0'))
     addresses = {}
     for name in assets:
         data = ('korean\\' + name).encode('ascii') + b'\0'
