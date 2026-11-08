@@ -18,6 +18,10 @@ tools/*
 !tools/singleplayer.py
 !tools/test_singleplayer.py
 !tools/test_entity_commands.py
+!tools/test_support.py
+!tools/test_silent_runtime.py
+!tools/test_resumable_transport.py
+!tools/test_combat_matrix.py
 !tools/netplay_campaign.py
 !tools/netplay_saves.py
 !tools/test_netplay_campaign.py
@@ -30,6 +34,8 @@ tools/*
 !tools/test_netplay_launcher.py
 !tools/netplay_stage.py
 !tools/netplay_recovery.py
+!tools/netplay_transport.py
+!tools/netplay_resources.py
 !tools/netplay_korean.py
 !tools/test_netplay_recovery.py
 !tools/test_native_recovery.py
@@ -58,5 +64,6 @@ docs/*
 !docs/RELEASE-v0.5.2.md
 !docs/RELEASE-v0.5.3.md
 !docs/RELEASE-v0.5.4.md
+!docs/RELEASE-v0.6.0.md
 !docs/VALIDATION.md
 !docs/THIRD_PARTY_NOTICES.txt

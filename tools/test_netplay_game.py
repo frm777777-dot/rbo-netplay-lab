@@ -9,6 +9,7 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_support  # Enforce silence in every owned game child.
 from netplay_protocol import Room, Server
 from prepare_test_runtime import prepare
 

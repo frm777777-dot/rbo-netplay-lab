@@ -2,6 +2,8 @@
 import ctypes as C
 from ctypes import wintypes as W
 import struct
+import os
+import tempfile
 from pathlib import Path
 import time
 
@@ -53,7 +55,27 @@ def check(ok):
 
 class Debugger:
     def __init__(self, exe, arguments=''):
-        self.exe=Path(exe).resolve(); self.breakpoints={}; self.threads={}; self.stepping={}
+        self.exe=Path(exe).resolve(); self.breakpoints={}; self.threads={}; self.stepping={}; self.exceptions=[]
+        if os.environ.get('RBO_TEST_SILENT') == '1':
+            # Test-only override, before the child can create an audio device.
+            # Never changes the installation or any user's active game.
+            owned = [Path(tempfile.gettempdir()) / name for name in
+                     ('rbo-netplay-lab', 'rbo-netplay-20261108')]
+            if not any(self.exe.is_relative_to(p.resolve()) for p in owned):
+                raise ValueError('Silent test games must use an isolated runtime')
+            movies = self.exe.parent / 'DATA/Movie'
+            if movies.exists() and any(p.is_file() for p in movies.rglob('*')):
+                raise ValueError('Silent test runtime must not contain movie audio')
+            config = self.exe.parent / 'DATA/SaveData/SystemConfig.v4'
+            defaults = (3, 0, 3, 0, 0, 0, 32, 32, 32, 32, 32, 32, 2, 2, 1, 3, 60, 0, 0, 0)
+            data = bytearray(config.read_bytes() if config.exists() else struct.pack('<20I', *defaults))
+            if len(data) != 80:
+                raise ValueError('Unexpected test sound configuration size')
+            if struct.unpack_from('<I', data)[0] != 3:
+                raise ValueError('Unrecognized test configuration version; refusing audible defaults')
+            struct.pack_into('<I', data, 15 * 4, 3)  # All non-movie audio off.
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_bytes(data)
         self.info=ProcessInfo(); startup=Startup(); startup.cb=C.sizeof(startup)
         command=C.create_unicode_buffer('"'+str(self.exe)+'" '+arguments)
         check(Create(str(self.exe),command,None,None,False,2,None,str(self.exe.parent),C.byref(startup),C.byref(self.info)))
@@ -137,6 +159,8 @@ class Debugger:
                             self.write(addr,b'\xcc')
                         elif code not in (0x80000003,0x4000001f):
                             if code!=0xe06d7363 or not event.u.exception.first:
+                                self.exceptions.append({'code': hex(code), 'address': hex(addr or 0), 'first': bool(event.u.exception.first)})
+                                self.exceptions = self.exceptions[-8:]
                                 print('EXCEPTION',hex(code),hex(addr or 0),'first',event.u.exception.first,flush=True)
                             status=0x80010001
                 finally:

@@ -9,6 +9,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_support  # Enforce silence in every owned game child.
 from prepare_test_runtime import prepare
 
 ROOT = Path(__file__).resolve().parent.parent

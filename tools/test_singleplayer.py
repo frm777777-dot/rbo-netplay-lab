@@ -9,6 +9,7 @@ import sys
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_support  # Enforce silence in every owned game child.
 from singleplayer import ROOT, play_single, single_store
 from netplay_protocol import ProtocolError
 from netplay_saves import SaveStore, validate

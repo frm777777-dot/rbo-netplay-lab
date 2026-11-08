@@ -18,6 +18,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from netplay_protocol import Client, ProtocolError, SessionEnded, fingerprint, require
 from win32_debug import Debugger
+from netplay_resources import ScriptResources
 
 ROOT = Path(__file__).resolve().parent.parent
 # 0x422b29/0x422930 build 35 eight-byte command nodes at +0x588.
@@ -30,8 +31,8 @@ POINTER_FIELDS = (0x64, 0x57c, 0x584, 0x58c, 0x594, 0x5b8, 0x5c4, 0x5d0, 0x5dc, 
 PRESENTATION_FIELDS = (0x2e8, 0x2f4, 0x3f4, 0x8d4, 0x8d8, 0x8dc)
 
 
-def capture_commands(debugger, node, blob, cache):
-    """Compare bounded active command prefixes and their native list order."""
+def capture_commands(debugger, node, blob, cache, resources):
+    """Compare complete script identities, offsets and native list order."""
     records, seen = [], set()
     for head in range(0x6a0, 0x6d0, 8):
         current = struct.unpack_from('<I', blob, head)[0]
@@ -44,7 +45,7 @@ def capture_commands(debugger, node, blob, cache):
             current, pointer = struct.unpack_from('<2I', blob, offset)
             require(pointer != 0, 'Missing active command data')
             if pointer not in cache:
-                cache[pointer] = debugger.read(pointer, 64)
+                cache[pointer] = resources.reference(pointer)
             records.append((head, offset, cache[pointer]))
     return records
 
@@ -73,9 +74,9 @@ def capture_state(debugger, raw_entities=None):
 
     All active entity bytes except identified address/presentation words;
     includes positions, links, child lists, character records and all RNG streams.
-    The two rectangle records referenced at +0x7f8/+0x7fc and 64-byte prefixes
-    of active command records are also compared. Complete variable-length
-    commands, other pointed-to allocations and unlisted globals are outside it.
+    Active scripts use full bytecode hashes and relative offsets. Animation,
+    attack and rectangle records are compared by content. Other pointed-to
+    allocations and unlisted globals remain outside this verified schema.
     """
     digest = hashlib.sha256()
     characters = debugger.read(0x25109c8, 0x660 * 3)
@@ -85,6 +86,7 @@ def capture_state(debugger, raw_entities=None):
     seen = set()
     positions = []
     command_cache = {}
+    resources = ScriptResources(debugger)
 
     def capture(node, group, parent=-1):
         require(node not in seen, 'Repeated entity')
@@ -102,16 +104,40 @@ def capture_state(debugger, raw_entities=None):
         # 0x4229ef stores a command-record pointer at +0x584; 0x423686
         # dereferences it via 0x423620. Compare record bytes, not heap addresses.
         condition_pointer = struct.unpack_from('<I', blob, 0x584)[0]
-        condition_prefix = debugger.read(condition_pointer, 64) if condition_pointer else b''
-        commands = capture_commands(debugger, node, blob, command_cache)
+        condition_prefix = resources.reference(condition_pointer) if condition_pointer else b''
+        commands = capture_commands(debugger, node, blob, command_cache, resources)
+        # 0x448500 indexes native animation records with a 300-byte stride.
+        # These are file data, not process allocations or graphics handles.
+        animations = [debugger.read(pointer, 300) if pointer else b'' for pointer in
+                      (struct.unpack_from('<I', blob, offset)[0] for offset in (0x64, 0x57c))]
+        # 0x448b50..0x448bdf creates up to two 8-byte attack rectangles and
+        # one 120-byte attack record. Inactive leftovers are never followed.
+        attack_count = struct.unpack_from('<I', blob, 0x768)[0]
+        require(attack_count <= 2, 'Unexpected attack rectangle count')
+        attacks = [debugger.read(struct.unpack_from('<I', blob, 0x770 + i * 4)[0], 8)
+                   for i in range(attack_count)]
+        attack_data = debugger.read(struct.unpack_from('<I', blob, 0x76c)[0], 120) if attack_count else b''
+        # 0x448d30 stores up to three more 8-byte collision rectangles. Like
+        # attack rectangles, their indices come from the animation resource.
+        body_count = struct.unpack_from('<I', blob, 0x78c)[0]
+        require(body_count <= 3, 'Unexpected body rectangle count')
+        bodies = [debugger.read(struct.unpack_from('<I', blob, 0x790 + i * 4)[0], 8)
+                  for i in range(body_count)]
         if raw_entities is not None:
             raw_entities.append({'group': group, 'slot': slot, 'parent': parent, 'raw': blob.hex(),
                                  'rectangles': [record.hex() for record in rectangles],
                                  'condition_prefix': condition_prefix.hex(),
-                                 'commands': [[head, offset, prefix.hex()] for head, offset, prefix in commands]})
+                                 'commands': [[head, offset, prefix.hex()] for head, offset, prefix in commands],
+                                 'animations': [v.hex() for v in animations], 'attack_data': attack_data.hex(),
+                                 'attacks': [v.hex() for v in attacks], 'body_rectangles': [v.hex() for v in bodies]})
         normalized = bytearray(blob)
         for offset in POINTER_FIELDS + PRESENTATION_FIELDS + COMMAND_POINTER_FIELDS:
             normalized[offset:offset + 4] = b'\0' * 4
+        # The lists above completely describe live command nodes. Unlinked
+        # nodes retain both data and next-word residue (e.g. +0x600 after a
+        # sword combo), which is not simulation state. Normalize the entire
+        # storage pool, then hash the validated live topology and references.
+        normalized[0x588:0x6a0] = bytes(0x6a0 - 0x588)
         digest.update(struct.pack('<IIi', group, slot, parent))
         digest.update(normalized)
         digest.update(bytes([bool(condition_pointer)]) + condition_prefix)
@@ -120,6 +146,8 @@ def capture_state(debugger, raw_entities=None):
             digest.update(struct.pack('<II', head, offset) + prefix)
         for record in rectangles:
             digest.update(record)
+        for record in animations + attacks + bodies + [attack_data]:
+            digest.update(struct.pack('<I', len(record)) + record)
         positions.append([group, slot, *struct.unpack_from('<3I', blob, 0x98)])
         child = struct.unpack_from('<I', blob, 20)[0]
         while child:

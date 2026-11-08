@@ -15,6 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
+import test_support  # Enforce silence in every owned game child.
 from netplay_protocol import Room, Server, Client, fingerprint
 from netplay_launcher import isolated_game
 from netplay_campaign import run_campaign
@@ -33,7 +34,7 @@ def child(args):
         values[1] = 0  # Windowed, as required by the online launcher.
         values[2] = (0, 2, 3)[args.slot]  # 640, 800, 1024 pixel width.
         values[6:12] = [16 if args.slot == 0 else 32] * 6
-        values[15] = (0, 3, 2)[args.slot]  # All audio, movies only, no BGM.
+        values[15] = 3  # Tests are silent on every peer; movies are absent.
         values[16] = 30 if args.slot == 1 else 60
         config.write_bytes(struct.pack('<20I', *values))
         (output / f'{args.slot}.settings.json').write_text(json.dumps(values))

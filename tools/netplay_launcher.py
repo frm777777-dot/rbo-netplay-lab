@@ -18,11 +18,15 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from netplay_campaign import run_campaign
 from netplay_protocol import ProtocolError, RecoveryNeeded, TransportError, GameCrashed, fingerprint, require
-from netplay_recovery import RecoveryClient as Client, RecoveryRoom as Room, RecoveryServer as Server
+from netplay_transport import RecoveryClient as Client, RecoveryRoom as Room, RecoveryServer as Server
 from netplay_saves import SaveStore, encode, validate, materialize
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 47624
+
+
+def connection_status(message):
+    print(message, file=sys.__stdout__, flush=True)
 
 
 def host_address(value):
@@ -118,7 +122,7 @@ def connect_guest(game_hash, path, address=None, port=None):
     while True:
         try:
             print(f'호스트에 연결하고 있습니다… {address}:{port}')
-            return Client((address, port), token, game_hash, timeout=45)
+            return Client((address, port), token, game_hash, timeout=45, status=connection_status)
         except (OSError, ProtocolError) as error:
             print(f'접속하지 못했습니다: {error}')
             while True:
@@ -213,7 +217,7 @@ def main():
     if args.mode == 'host' and args.port is None:
         args.port = DEFAULT_PORT
     require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
-    print('RBO 2~3인 온라인 실험판 v0.5.4 — 활 공격 동기화 보정 / 한글')
+    print('RBO 2~3인 온라인 실험판 v0.6.0 — 연결 유지 복구·공격 동기화 / 한글')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
     print('공통 메뉴와 출발은 1P, 캐릭터 선택·생성과 전투는 각자 조작합니다.')
     print('호스트가 전원 저장하고 친구 PC에도 사본을 보관합니다.\n')
@@ -244,11 +248,13 @@ def main():
                 raise ProtocolError('같은 저장 폴더를 사용하는 호스트가 이미 실행 중입니다.')
             checkpoint = save_store.load()
             room = Room(secrets.token_urlsafe(18), secrets.token_urlsafe(24),
-                        frames=args.frames, delay=args.delay, timeout=45, players=players)
+                        frames=args.frames, delay=args.delay, timeout=45, players=players,
+                        diagnostics_dir=logs / 'events')
             server = Server(room, (args.bind, args.port))
             thread = threading.Thread(target=server.serve, daemon=True)
             thread.start()
-            client = Client(('127.0.0.1', args.port), room.host_token, game_hash, 'host', timeout=45)
+            client = Client(('127.0.0.1', args.port), room.host_token, game_hash, 'host', timeout=45,
+                            status=connection_status)
             print(f'서버 포트: TCP {args.port}')
             print(f'친구에게 전달할 방 코드: {room.token}')
             print('친구는 Join-Online.cmd에서 이 PC의 접속 주소·포트·방 코드를 입력합니다.')
@@ -270,8 +276,8 @@ def main():
         materialize(checkpoint, directory / 'DATA/SaveData')
         print(f'온라인 저장 폴더: {save_store.directory}')
         print('1P가 타이틀에서 Z로 시작하고, 캐릭터 화면에서 모두 Z로 참가하세요.')
-        print('연결이 끊기거나 진행이 어긋나면 자동으로 재접속하고 스테이지 시작 지점으로 돌아갑니다.')
-        print('복구 중에는 게임 창이 다시 열립니다. 실행기 창은 닫지 마세요.')
+        print('잠깐 연결이 끊기면 게임을 멈춰 두고 재접속한 뒤 같은 지점에서 계속합니다.')
+        print('실제 진행 차이나 게임 충돌은 스테이지 시작 지점에서 복구합니다. 실행기 창은 닫지 마세요.')
         print('저장된 캐릭터는 유지되며, 복구가 반복되면 저장본을 유지한 채 타이틀로 돌아갑니다.')
         print('게임 창에 포커스를 두고 조작하세요. 창을 닫으면 방 전체가 종료됩니다.')
         print('플레이 시간 제한 없이 진행합니다. 종료하려면 게임 창을 닫으세요.' if not client.frames

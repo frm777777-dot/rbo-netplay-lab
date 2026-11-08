@@ -37,6 +37,20 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
     restore_pending = stage is not None
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with FrameLog(log_path, bounded=not full_log) as log:
+        def record_failure(error, meta, raw, d=None):
+            diagnostic = {'frame': frame, 'state': meta, 'entities': raw, 'recent': list(recent), 'error': str(error)}
+            try:
+                if d is not None:
+                    diagnostic['characters'] = d.read(0x25109c8, 0x660 * 3).hex()
+            except OSError:
+                pass
+            try:
+                log_path.with_suffix('.failure.json').write_text(json.dumps(diagnostic), encoding='utf-8')
+            except OSError:
+                pass
+            if hasattr(client, 'report_failure'):
+                client.report_failure(diagnostic)
+
         def seed(d, ctx):
             index = d.uint(ctx.esp + 4)
             require(index < 3, 'Invalid random stream')
@@ -88,7 +102,11 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             if scene == 0:
                 meta['pause'] = d.words(0xbc7af8, 4)
                 meta['battle_phase'] = d.uint(0xadff7c)
-                meta['combat'] = capture_state(d, raw)
+                try:
+                    meta['combat'] = capture_state(d, raw)
+                except (ProtocolError, OSError) as error:
+                    record_failure(error, meta, raw, d)
+                    raise GameCrashed('게임 상태를 안전하게 읽지 못해 시작 지점에서 복구합니다.') from error
             if stage_pending is not None and frame:
                 meta['stage_checkpoint'] = hashlib.sha256(encode(stage_pending)).hexdigest()
             digest = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest() if frame else None
@@ -107,12 +125,11 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
                     stage_pending = None
             except SessionEnded:
                 raise
-            except ProtocolError:
-                diagnostic = {'frame': frame, 'state': meta, 'entities': raw, 'recent': list(recent)}
-                log_path.with_suffix('.failure.json').write_text(json.dumps(diagnostic), encoding='utf-8')
+            except ProtocolError as error:
+                record_failure(error, meta, raw, d)
                 raise
             accepted = client.received_checkpoint
-            if accepted is not None and accepted is not committed:
+            if accepted is not None and accepted != committed:
                 require(checkpoint is not None and accepted['profile'] == checkpoint['profile'], 'Unexpected save identity')
                 if save_store:
                     save_store.commit(accepted)
@@ -223,7 +240,10 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             debugger = Debugger(directory / 'rbo_ex3.exe')
             debugger.run(created, seconds)
             if debugger.exit_code not in (None, 0):
-                raise GameCrashed(f'Game process exited with code 0x{debugger.exit_code:08x}')
+                error = GameCrashed(f'Game process exited with code 0x{debugger.exit_code:08x}; native exceptions: {debugger.exceptions}')
+                latest = recent[-1] if recent else {}
+                record_failure(error, latest.get('state', {}), latest.get('entities', []))
+                raise error
             if client.frames:
                 require(frame == client.frames, f'Game stopped early: {frame}/{client.frames}')
             client.finish()
@@ -235,5 +255,5 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
                 require(checkpoint is not None and accepted['profile'] == checkpoint['profile'], 'Unexpected save identity')
                 save_store.commit(accepted)
                 result['save_revision'] = accepted['revision']
-    result.update(frames=frame, mapping=mapping)
+    result.update(frames=frame, mapping=mapping, transport_resumes=getattr(client, 'transport_resumes', 0))
     return result
