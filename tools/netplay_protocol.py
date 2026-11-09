@@ -9,7 +9,7 @@ import struct
 import threading
 import time
 
-VERSION = 'rbo-ex3-lab-6.0'
+VERSION = 'rbo-ex3-lab-6.2'
 MAX_MESSAGE = 768 * 1024
 MAX_INPUT = 0x3001ff  # nine native actions plus host F12/Escape
 EXPECTED_EXE = '05b14b047e49dabb026c96150f8d5aab497d20d9b2d52f5e59a8aef1af5b8dc0'

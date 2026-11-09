@@ -42,6 +42,7 @@ tools/*
 !tools/netplay_korean.py
 !tools/test_netplay_recovery.py
 !tools/test_native_recovery.py
+!tools/test_native_focus.py
 !tools/test_korean_patch.py
 !tools/build_korean_patch.py
 !localization/
@@ -69,5 +70,6 @@ docs/*
 !docs/RELEASE-v0.5.4.md
 !docs/RELEASE-v0.6.0.md
 !docs/RELEASE-v0.6.1.md
+!docs/RELEASE-v0.6.2.md
 !docs/VALIDATION.md
 !docs/THIRD_PARTY_NOTICES.txt

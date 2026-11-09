@@ -207,6 +207,12 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             # Normal-mode replay recording is separate from character saves.
             # Skip its finite input buffer and 25/30-minute warning popups.
             patch(d, 0x438edf, bytes.fromhex('8b0db064b000'), bytes.fromhex('e98700000090'))
+            # WM_NCACTIVATE / WM_CANCELMODE flush pending battle photos on only
+            # the locally activated/deactivated PC. That flush consumes RNG 1
+            # and changes photo slots, desynchronizing otherwise equal games.
+            # Defer it to the existing shared scene teardown. Keep Windows'
+            # default activation handling and every RNG/state comparison.
+            patch(d, 0x43f37a, bytes.fromhex('e881adffff'), b'\x90' * 5)
             def map_start(d, ctx):
                 if d.uint(0x2553c20) == 0xffffffff:
                     d.write(0x2553c20, b'\0' * 4)
