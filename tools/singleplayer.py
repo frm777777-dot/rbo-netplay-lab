@@ -156,7 +156,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--game', type=Path)
     args = parser.parse_args()
-    print('RBO 한글 싱글 v0.5.4 — 온라인과 별도 저장\n')
+    print('RBO 한글 싱글 v0.7.1 — 볼륨 조절·온라인과 별도 저장\n')
     play_single(args.game or pick_game())
 
 

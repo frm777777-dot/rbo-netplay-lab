@@ -111,6 +111,8 @@ class Debugger:
 
     def run(self,on_create,seconds=120):
         deadline=time.monotonic()+seconds if seconds is not None else None
+        from game_audio import start_volume
+        volume = start_volume(self.pid)
         try:
             while deadline is None or time.monotonic()<deadline:
                 watchdog = getattr(self, 'watchdog', None)
@@ -169,6 +171,8 @@ class Debugger:
                 finally:
                     check(Continue(event.pid,event.tid,status))
         finally:
+            if volume is not None:
+                volume.close()
             if not self.exited:
                 Terminate(self.handle,0)
                 # Debug events are queued per debugger thread, not per object.

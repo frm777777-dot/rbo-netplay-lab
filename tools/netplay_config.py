@@ -168,6 +168,9 @@ def main():
     parser.add_argument('--game', type=Path)
     parser.add_argument('--build-only', action='store_true')
     args = parser.parse_args()
+    if not args.build_only:
+        from game_audio import configure_volume
+        configure_volume()
     if args.game:
         source = args.game.resolve()
     else:

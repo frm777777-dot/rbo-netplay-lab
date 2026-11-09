@@ -5,9 +5,9 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-FILES = ('Host-Online.cmd', 'Join-Online.cmd', 'Settings-Online.cmd', 'Single-Korean.cmd', 'Launch-RBO.cmd', 'Select-Game.cmd', '온라인 시험판 사용법.txt',
+FILES = ('Host-Online.cmd', 'Join-Online.cmd', 'Settings-Online.cmd', 'Volume-Settings.cmd', 'Single-Korean.cmd', 'Launch-RBO.cmd', 'Select-Game.cmd', '온라인 시험판 사용법.txt',
          'tools/netplay_launcher.py', 'tools/game_settings.py', 'tools/netplay_game.py', 'tools/netplay_config.py', 'tools/singleplayer.py',
-         'tools/netplay_campaign.py', 'tools/netplay_saves.py', 'tools/netplay_inspection.py',
+         'tools/netplay_campaign.py', 'tools/netplay_saves.py', 'tools/netplay_inspection.py', 'tools/game_audio.py',
          'tools/netplay_stage.py', 'tools/netplay_recovery.py', 'tools/netplay_transport.py', 'tools/netplay_resources.py', 'tools/netplay_korean.py',
          'tools/netplay_protocol.py', 'tools/win32_debug.py',
          'localization/ko/patch.json', 'docs/THIRD_PARTY_NOTICES.txt',
