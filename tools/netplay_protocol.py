@@ -9,7 +9,7 @@ import struct
 import threading
 import time
 
-VERSION = 'rbo-ex3-lab-6.2'
+VERSION = 'rbo-ex3-lab-7.0'
 MAX_MESSAGE = 768 * 1024
 MAX_INPUT = 0x3001ff  # nine native actions plus host F12/Escape
 EXPECTED_EXE = '05b14b047e49dabb026c96150f8d5aab497d20d9b2d52f5e59a8aef1af5b8dc0'
@@ -25,10 +25,17 @@ class TransportError(ProtocolError):
 
 class RecoveryNeeded(ProtocolError):
     """The coordinator invalidated this simulation; restart from its checkpoint."""
+    def __init__(self, message, mode='restart'):
+        super().__init__(message)
+        self.mode = mode
 
 
 class GameCrashed(ProtocolError):
     pass
+
+
+class PreparedRestart(GameCrashed):
+    """The new generation is ready, but this process must be replaced before frame zero."""
 
 
 class SessionEnded(ProtocolError):
@@ -65,7 +72,9 @@ def receive(sock, *, recovery_signal=True):
         raise ProtocolError('Invalid JSON') from exc
     require(type(result) is dict, 'Expected an object')
     if recovery_signal and result.get('type') == 'recover':
-        raise RecoveryNeeded(str(result.get('message', 'Reloading the stage')))
+        mode = result.get('mode', 'restart')
+        require(mode in ('restart', 'reload'), 'Invalid recovery instruction')
+        raise RecoveryNeeded(str(result.get('message', 'Reloading the stage')), mode)
     if result.get('type') == 'error':
         raise ProtocolError(str(result.get('message', 'Session stopped')))
     if result.get('type') == 'ended':

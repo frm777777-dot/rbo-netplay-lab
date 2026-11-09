@@ -69,7 +69,7 @@ class FrameLog:
         self.handler.close()
 
 
-def capture_state(debugger, raw_entities=None):
+def capture_state(debugger, raw_entities=None, presentation=None):
     """Known gameplay candidates, not a hash of all process memory.
 
     All active entity bytes except identified address/presentation words;
@@ -131,6 +131,10 @@ def capture_state(debugger, raw_entities=None):
                                  'animations': [v.hex() for v in animations], 'attack_data': attack_data.hex(),
                                  'attacks': [v.hex() for v in attacks], 'body_rectangles': [v.hex() for v in bodies]})
         normalized = bytearray(blob)
+        if presentation is not None:
+            presentation.update(struct.pack('<I', slot))
+            for offset in PRESENTATION_FIELDS:
+                presentation.update(blob[offset:offset + 4])
         for offset in POINTER_FIELDS + PRESENTATION_FIELDS + COMMAND_POINTER_FIELDS:
             normalized[offset:offset + 4] = b'\0' * 4
         # The lists above completely describe live command nodes. Unlinked

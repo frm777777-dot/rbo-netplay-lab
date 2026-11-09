@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import test_support  # Enforce silence in every owned game child.
 from netplay_launcher import isolated_game
 from netplay_campaign import run_campaign
-from netplay_protocol import fingerprint, RecoveryNeeded, TransportError, GameCrashed
+from netplay_protocol import fingerprint, RecoveryNeeded, TransportError, GameCrashed, PreparedRestart
 from netplay_transport import RecoveryRoom, RecoveryServer, RecoveryClient
 from netplay_saves import SaveStore, materialize, encode
 from win32_debug import Terminate
@@ -31,6 +31,7 @@ def child(args):
     checkpoint = json.loads(client.ready(encode(initial) if client.slot == 0 else None))
     store.commit(checkpoint)
     process_ids = set()
+    window_handles = set()
     try:
         while True:
             generation = output / f'epoch-{client.epoch}'
@@ -39,18 +40,31 @@ def child(args):
             materialize(checkpoint, directory / 'DATA/SaveData')
             battle_frames = 0
             cleared = False
+            seen_epoch = client.epoch
 
             def control(frame, slot, meta, debugger):
-                nonlocal battle_frames, cleared
+                nonlocal battle_frames, cleared, seen_epoch
+                if seen_epoch != client.epoch:
+                    battle_frames = 0
+                    cleared = False
+                    seen_epoch = client.epoch
                 process_ids.add(debugger.pid)
+                window_handles.add(debugger.uint(0x256c098))
                 assert struct.unpack('<20I', (directory / 'DATA/SaveData/SystemConfig.v4').read_bytes())[15] == 3
-                if client.epoch == 0 and (frame == 360 or args.fault == 'disconnect' and frame in (900, 1200)) and slot == client.players - 1:
+                if (client.epoch == 0 or args.fault == 'repeat' and client.epoch == 1) and (frame == 360 or args.fault == 'disconnect' and frame in (900, 1200)) and slot == client.players - 1:
                     print('INJECT_FAULT', args.fault, flush=True)
                     if args.fault == 'disconnect':
                         client.socket.shutdown(socket.SHUT_RDWR)
                         client.socket.close()
-                    elif args.fault == 'desync':
+                    elif args.fault in ('desync', 'repeat', 'reloadfail'):
                         debugger.write(0x25109c8 + 32, struct.pack('<I', 98765))
+                        if args.fault == 'reloadfail':
+                            original = debugger.watchdog
+                            def fail_reload():
+                                original()
+                                if client.epoch == 1:
+                                    raise GameCrashed('Injected scene reload failure')
+                            debugger.watchdog = fail_reload
                     elif args.fault == 'crash':
                         Terminate(debugger.handle, 0xdead)
                     else:
@@ -68,13 +82,16 @@ def child(args):
                 result = run_campaign(directory, client, generation / f'{args.index}.jsonl', seconds=300,
                                       control=control, full_log=True, checkpoint=checkpoint,
                                       save_store=store, stage=client.stage)
-                result.update(process_ids=sorted(process_ids), transport_resumes=client.transport_resumes)
+                result.update(process_ids=sorted(process_ids), window_handles=sorted(window_handles), transport_resumes=client.transport_resumes)
                 (output / f'{args.index}.result.json').write_text(json.dumps(result))
                 break
             except (RecoveryNeeded, TransportError, GameCrashed) as error:
                 print('RECOVERY', client.epoch, str(error), flush=True)
-                client.request_recovery()
-                checkpoint = json.loads(client.reconnect(encode(initial) if client.slot == 0 else None))
+                if isinstance(error, PreparedRestart):
+                    checkpoint = client.received_checkpoint
+                else:
+                    client.request_recovery()
+                    checkpoint = json.loads(client.reconnect(encode(initial) if client.slot == 0 else None))
                 store.commit(checkpoint)
                 assert client.slot == args.index, 'Seat changed'
     finally:
@@ -114,20 +131,23 @@ def parent(args):
         print('NATIVE_RECOVERY_STARTED', args.fault, args.players, flush=True)
         for process in processes:
             process.wait(timeout=max(1, 360 - (time.monotonic() - started)))
-        rows = [[json.loads(line) for line in (output / f'epoch-{room.epoch}/{i}.jsonl').read_text().splitlines()]
-                for i in range(args.players)]
+        all_rows = [[json.loads(line) for path in sorted(output.glob(f'epoch-*/{i}.jsonl'))
+                     for line in path.read_text().splitlines()] for i in range(args.players)]
+        rows = [[r for r in records if r['epoch'] == room.epoch] for records in all_rows]
         saves = [json.loads((output / f'saves-{i}/current.json').read_bytes()) for i in range(args.players)]
         identical = all(len(row) == len(rows[0]) and all(a['state'] == b['state'] and a['inputs'] == b['inputs']
                          for a, b in zip(rows[0], row)) for row in rows[1:])
         stages = sorted({r['state']['stage'] + 1 for r in rows[0] if r['state']['scene'] == 0})
-        first = [next(json.loads(line)['state'] for line in (output / f'epoch-{epoch}/0.jsonl').read_text().splitlines()
-                      if json.loads(line)['state']['scene'] == 0) for epoch in (0, room.epoch)]
+        first = [next(r['state'] for r in all_rows[0] if r['epoch'] == epoch and r['state']['scene'] == 0)
+                 for epoch in (0, room.epoch)]
+        first = [{k: v for k, v in state.items() if k != 'stage_checkpoint'} for state in first]
         summary = {'exit_codes': [p.returncode for p in processes], 'error': room.error, 'recovery': list(room.recovery_history),
                    'identical': identical, 'stage_start_restored': first[0] == first[1], 'stages': stages,
                    'saves_identical': all(value == saves[0] for value in saves), 'save_files': sorted(saves[0]['files']),
                    'elapsed': round(time.monotonic() - started, 2)}
         results = [json.loads((output / f'{i}.result.json').read_bytes()) for i in range(args.players)]
-        summary.update(process_ids=[r['process_ids'] for r in results], transport_resumes=[r['transport_resumes'] for r in results])
+        summary.update(process_ids=[r['process_ids'] for r in results], window_handles=[r['window_handles'] for r in results],
+                       scene_reloads=[r['scene_reloads'] for r in results], transport_resumes=[r['transport_resumes'] for r in results])
         (output / 'summary.json').write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary), flush=True)
         assert summary['exit_codes'] == [0] * args.players and room.error is None, summary
@@ -135,7 +155,12 @@ def parent(args):
             assert room.epoch == 0 and all(len(r['process_ids']) == 1 for r in results), summary
             assert sum(r['transport_resumes'] for r in results) >= 3, summary
         else:
-            assert room.epoch == 1 and summary['stage_start_restored'], summary
+            assert room.epoch == (2 if args.fault in ('repeat', 'reloadfail') else 1) and summary['stage_start_restored'], summary
+            if args.fault in ('desync', 'repeat'):
+                assert all(len(r['process_ids']) == len(r['window_handles']) == 1 for r in results), summary
+                assert all(r['scene_reloads'] == room.epoch for r in results), summary
+            elif args.fault == 'reloadfail':
+                assert all(len(r['process_ids']) == 2 for r in results), summary
         assert identical and stages == ([1, 2] if args.frames >= 2500 else [1]) and summary['saves_identical'], summary
         original = json.loads(args.restore.read_bytes())
         assert set(original['files']) <= set(saves[0]['files']), 'Lost character saves'
@@ -164,6 +189,6 @@ if __name__ == '__main__':
     parser.add_argument('--tag', default='native-recovery')
     parser.add_argument('--players', type=int, choices=(2, 3), default=3)
     parser.add_argument('--frames', type=int, default=3000)
-    parser.add_argument('--fault', choices=('disconnect', 'desync', 'crash', 'exception'), default='disconnect')
+    parser.add_argument('--fault', choices=('disconnect', 'desync', 'repeat', 'reloadfail', 'crash', 'exception'), default='disconnect')
     options = parser.parse_args()
     child(options) if options.index is not None else parent(options)

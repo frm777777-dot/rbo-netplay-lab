@@ -159,6 +159,39 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(self.room.checkpoint, SAVE)
         self.assertEqual(self.room.epoch, 0)
 
+    def test_presentation_only_difference_is_classified_without_reload(self):
+        for frame in range(self.delay + 8):
+            list(self.pool.map(lambda c: c.exchange(0, STATE if frame else None,
+                detail={'scene': 0, 'presentation': str(c.slot)}), self.clients))
+        events = [e for e in self.room.network_events if e['event'] == 'presentation_difference']
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['inspection']['action'], 'continue')
+        self.assertEqual(self.room.epoch, 0)
+        self.assertEqual(self.room.checkpoint, SAVE)
+
+    def test_battle_inspection_selects_reload_without_committing_failed_save(self):
+        from test_netplay_recovery import stage
+        self.room.stage = stage(self.players)
+        self.exchange()
+        future = dict(SAVE, revision=5)
+        def diverge(c):
+            try:
+                detail = {'scene': 0, 'next_scene': 0, 'stage': self.room.stage['stage'], 'mode': 1,
+                          'combat': {'state': STATE}, 'rng': [1, 2 + c.slot, 3]}
+                for frame in range(self.delay + 2):
+                    c.exchange(0, STATE if c.slot == 0 else 'c' * 64, detail=detail,
+                               checkpoint=future if c.slot == 0 and frame == 0 else None)
+            except RecoveryNeeded as error:
+                return error.mode
+        self.assertEqual(list(self.pool.map(diverge, self.clients)), ['reload'] * self.players)
+        self.assertEqual(self.room.checkpoint, SAVE)
+        self.assertEqual(self.room.inspection['kind'], 'random')
+        self.assertEqual(self.room.epoch, 1)
+        list(self.pool.map(lambda c: c.reconnect(status=lambda _: None, deadline_seconds=5), self.clients))
+        self.assertEqual([c.recovery_mode for c in self.clients], ['reload'] * self.players)
+        self.assertEqual([c.received_checkpoint for c in self.clients], [SAVE] * self.players)
+        self.exchange()
+
     def test_save_payload_is_sent_only_on_confirmed_changes(self):
         for _ in range(self.delay + 3):
             self.exchange()

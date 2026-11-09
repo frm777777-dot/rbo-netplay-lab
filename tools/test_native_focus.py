@@ -126,7 +126,7 @@ def child(args):
         with patch('netplay_campaign.Debugger', FocusDebugger):
             result = run_campaign(directory, client, output / f'{args.slot}.jsonl', seconds=180,
                                   control=control, full_log=True, checkpoint=checkpoint,
-                                  save_store=store, stage=client.stage)
+                                  save_store=store, stage=client.stage, allow_reload=not args.unpatched)
     except ProtocolError as error:
         result['error'] = str(error)
         if not args.unpatched:

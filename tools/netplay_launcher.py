@@ -17,7 +17,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from netplay_campaign import run_campaign
-from netplay_protocol import ProtocolError, RecoveryNeeded, TransportError, GameCrashed, fingerprint, require
+from netplay_protocol import ProtocolError, RecoveryNeeded, TransportError, GameCrashed, PreparedRestart, fingerprint, require
 from netplay_transport import RecoveryClient as Client, RecoveryRoom as Room, RecoveryServer as Server
 from netplay_saves import SaveStore, encode, validate, materialize
 from game_settings import pick_game
@@ -206,7 +206,7 @@ def main():
     if args.mode == 'host' and args.port is None:
         args.port = DEFAULT_PORT
     require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
-    print('RBO 2~3인 온라인 실험판 v0.6.2 — 창 전환 복구 오류 수정 / 연결 유지·한글')
+    print('RBO 2~3인 온라인 실험판 v0.7.0 — 일시정지 진단·같은 창에서 스테이지 복구')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
     print('공통 메뉴와 출발은 1P, 캐릭터 선택·생성과 전투는 각자 조작합니다.')
     print('호스트가 전원 저장하고 친구 PC에도 사본을 보관합니다.\n')
@@ -266,7 +266,9 @@ def main():
         print(f'온라인 저장 폴더: {save_store.directory}')
         print('1P가 타이틀에서 Z로 시작하고, 캐릭터 화면에서 모두 Z로 참가하세요.')
         print('잠깐 연결이 끊기면 게임을 멈춰 두고 재접속한 뒤 같은 지점에서 계속합니다.')
-        print('실제 진행 차이나 게임 충돌은 스테이지 시작 지점에서 복구합니다. 실행기 창은 닫지 마세요.')
+        print('전투 진행 차이는 일시정지해 확인한 뒤 같은 게임 창에서 스테이지를 다시 불러옵니다.')
+        print('게임 자체의 충돌·지원하지 않는 장면·장면 복구 실패 때는 게임을 재실행합니다.')
+        print('스테이지 시작 지점부터 다시 진행합니다. 실행기 창은 닫지 마세요.')
         print('저장된 캐릭터는 유지되며, 복구가 반복되면 저장본을 유지한 채 타이틀로 돌아갑니다.')
         print('게임 창에 포커스를 두고 조작하세요. 창을 닫으면 방 전체가 종료됩니다.')
         print('플레이 시간 제한 없이 진행합니다. 종료하려면 게임 창을 닫으세요.' if not client.frames
@@ -281,8 +283,11 @@ def main():
                 break
             except (RecoveryNeeded, TransportError, GameCrashed) as error:
                 print(f'일시 중단: {error}')
-                client.request_recovery()
-                checkpoint = json.loads(client.reconnect(initial_header))
+                if isinstance(error, PreparedRestart):
+                    checkpoint = client.received_checkpoint
+                else:
+                    client.request_recovery()
+                    checkpoint = json.loads(client.reconnect(initial_header))
                 save_store.commit(checkpoint)
                 directory = isolated_game(source)
                 materialize(checkpoint, directory / 'DATA/SaveData')

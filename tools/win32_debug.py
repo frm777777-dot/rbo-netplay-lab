@@ -113,6 +113,9 @@ class Debugger:
         deadline=time.monotonic()+seconds if seconds is not None else None
         try:
             while deadline is None or time.monotonic()<deadline:
+                watchdog = getattr(self, 'watchdog', None)
+                if watchdog is not None:
+                    watchdog()
                 event=Event()
                 if not Wait(C.byref(event),200):
                     err=C.get_last_error()

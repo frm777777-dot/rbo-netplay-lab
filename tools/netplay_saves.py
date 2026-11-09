@@ -61,11 +61,18 @@ def capture(directory, profile, revision):
     return checkpoint
 
 
-def materialize(checkpoint, directory):
-    """Called before game launch, into its new private runtime directory."""
+def materialize(checkpoint, directory, *, discard_unconfirmed=False):
+    """Write an owned runtime, before launch or while stopped at scene load."""
     blobs = validate(checkpoint)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    if discard_unconfirmed:
+        for path in directory.iterdir():
+            if expected_size(path.name) is not None and path.name not in blobs:
+                if path.is_symlink():
+                    raise ValueError('Refusing a redirected save destination')
+                if path.is_file():
+                    path.unlink()
     for name, blob in blobs.items():
         path = directory / name
         if path.is_symlink():

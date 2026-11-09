@@ -21,6 +21,7 @@ from netplay_recovery import RecoveryRoom as StageRoom, RecoveryServer as StageS
 from netplay_recovery import RecoveryClient as StageClient
 from netplay_saves import encode, validate
 from netplay_stage import validate_stage
+from netplay_inspection import classify
 
 TRANSPORT_VERSION = VERSION + '-resume-2'
 
@@ -37,6 +38,9 @@ class RecoveryRoom(StageRoom):
         self.event_number = 0
         self.event_paths = deque()
         self.reported = set()
+        self.recovery_mode = 'restart'
+        self.inspection = None
+        self.presentation_reported = False
 
     def event(self, kind, **data):
         record = {'event': kind, 'epoch': self.epoch, **data}
@@ -87,14 +91,16 @@ class RecoveryRoom(StageRoom):
                     self.event('peer_diagnostic', epoch=epoch, slot=slot, detail=detail)
             return {'type': 'control_ok'}
 
-    def recover(self, reason, epoch):
+    def recover(self, reason, epoch, *, mode='restart'):
         with self.condition:
             before = self.epoch
             super().recover(reason, epoch)
             if self.epoch != before:
+                self.recovery_mode = mode if self.stage is not None else 'restart'
                 self.started = False
                 self.confirmed_frame = -1
-                self.event('stage_restart', reason=str(reason), stage=None if self.stage is None else self.stage['stage'])
+                self.event('stage_restart', reason=str(reason), stage=None if self.stage is None else self.stage['stage'],
+                           mode=self.recovery_mode)
 
     def attach(self, hello):
         fields = {'type', 'version', 'token', 'role', 'game_hash', 'resume', 'live', 'epoch', 'cursor'}
@@ -163,6 +169,7 @@ class RecoveryRoom(StageRoom):
         with self.condition:
             result = super().prepare_generation(slot, lease, epoch, packet)
             self.started = True
+            result.update(recovery_mode=self.recovery_mode, inspection=self.inspection)
             return result
 
     def submit_generation(self, slot, lease, epoch, packet):
@@ -215,11 +222,18 @@ class RecoveryRoom(StageRoom):
                 if len(entry['inputs']) == self.players:
                     require(frame == self.confirmed_frame + 1, 'Noncontiguous confirmed input')
                     if len(set(entry['states'].values())) != 1:
+                        self.inspection = classify(entry['details'], entry['states'], self.stage)
+                        self.event('state_inspection', frame=frame, inspection=self.inspection)
                         self.failure_details = {'epoch': epoch, 'frame': frame,
                                                 'digests': entry['states'], 'players': entry['details']}
                         self.event('state_mismatch', **self.failure_details)
-                        self.recover(f'Game state diverged at frame {frame}', epoch)
-                        raise RecoveryNeeded('게임 진행 차이를 감지했습니다. 스테이지를 다시 불러옵니다.')
+                        self.recover(f'Game state diverged at frame {frame}', epoch, mode=self.inspection['action'])
+                        raise RecoveryNeeded('게임을 일시정지했습니다. 진행 차이를 확인하고 복구합니다.')
+                    if not self.presentation_reported:
+                        inspection = classify(entry['details'], entry['states'], self.stage)
+                        if inspection['kind'] == 'presentation':
+                            self.event('presentation_difference', frame=frame, inspection=inspection)
+                            self.presentation_reported = True
                     if entry['stage'] is not None:
                         expected = hashlib.sha256(encode(entry['stage'])).hexdigest()
                         require(all(isinstance(v, dict) and v.get('stage_checkpoint') == expected
@@ -295,7 +309,7 @@ class RecoveryServer(StageServer):
         except SessionEnded as error:
             self.deliver_end(connection, {'type': 'ended', 'message': str(error), 'checkpoint': self.room.checkpoint})
         except RecoveryNeeded as error:
-            self.deliver_end(connection, {'type': 'recover', 'message': str(error)})
+            self.deliver_end(connection, {'type': 'recover', 'message': str(error), 'mode': self.room.recovery_mode})
         except (TransportError, OSError) as error:
             with self.room.condition:
                 if slot is not None and self.room.leases.get(slot) == lease:

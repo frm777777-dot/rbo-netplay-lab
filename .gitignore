@@ -26,6 +26,8 @@ tools/*
 !tools/test_resumable_transport.py
 !tools/test_combat_matrix.py
 !tools/netplay_campaign.py
+!tools/netplay_inspection.py
+!tools/test_netplay_inspection.py
 !tools/netplay_saves.py
 !tools/test_netplay_campaign.py
 !tools/test_netplay_saves.py
@@ -71,5 +73,6 @@ docs/*
 !docs/RELEASE-v0.6.0.md
 !docs/RELEASE-v0.6.1.md
 !docs/RELEASE-v0.6.2.md
+!docs/RELEASE-v0.7.0.md
 !docs/VALIDATION.md
 !docs/THIRD_PARTY_NOTICES.txt

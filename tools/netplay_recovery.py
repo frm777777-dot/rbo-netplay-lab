@@ -295,6 +295,9 @@ class RecoveryClient(Client):
         checkpoint = json.loads(bytes.fromhex(result['header']))
         validate(checkpoint)
         self.stage = result.get('stage')
+        self.recovery_mode = result.get('recovery_mode', 'restart')
+        require(self.recovery_mode in ('restart', 'reload'), 'Invalid recovery mode')
+        self.inspection = result.get('inspection')
         if self.stage is not None:
             validate_stage(self.stage, self.players)
         self.received_checkpoint = checkpoint

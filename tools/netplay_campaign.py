@@ -7,9 +7,9 @@ import time
 from collections import deque
 
 from netplay_game import FrameLog, capture_state
-from netplay_protocol import require, ProtocolError, SessionEnded, GameCrashed
+from netplay_protocol import require, ProtocolError, SessionEnded, GameCrashed, RecoveryNeeded, PreparedRestart
 from win32_debug import Debugger
-from netplay_saves import capture as capture_saves, encode
+from netplay_saves import capture as capture_saves, encode, materialize
 from netplay_stage import capture_stage, restore_stage
 
 TICK_HZ = 120
@@ -21,7 +21,7 @@ def patch(d, address, expected, replacement):
     d.write(address, replacement)
 
 
-def run_campaign(directory, client, log_path, *, seconds=None, control=None, full_log=False, checkpoint=None, save_store=None, stage=None, stage_observer=None):
+def run_campaign(directory, client, log_path, *, seconds=None, control=None, full_log=False, checkpoint=None, save_store=None, stage=None, stage_observer=None, allow_reload=True):
     directory, log_path = Path(directory), Path(log_path)
     frame = 0
     last_scene = None
@@ -35,6 +35,10 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
     recent = deque(maxlen=client.delay + 8)
     stage_pending = None
     restore_pending = stage is not None
+    reload_phase = None
+    reload_started = None
+    reload_update = None
+    result['scene_reloads'] = 0
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with FrameLog(log_path, bounded=not full_log) as log:
         def record_failure(error, meta, raw, d=None):
@@ -56,8 +60,25 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             require(index < 3, 'Invalid random stream')
             d.write(ctx.esp + 8, struct.pack('<I', (0x12345678 + index * 0x11111111) & 0x7fffffff))
 
+        def clear_input(d):
+            ptr = d.uint(0xbc80c4)
+            d.write(ptr, bytes(12))
+            processors = d.uint(0xbc80bc)
+            for i in range(3):
+                d.write(d.uint(processors + i * 4) + 4, bytes(4))
+            d.write(0xbc80cc, bytes(4))
+
+        def reload_watchdog():
+            if reload_started is not None and time.monotonic() - reload_started > 30:
+                raise GameCrashed('장면을 다시 불러오지 못해 게임 재실행으로 복구합니다.')
+
         def poll(d, ctx):
             nonlocal frame, last_scene, next_tick, mapping, published, committed, save_dirty, stage_pending
+            nonlocal checkpoint, stage, restore_pending, reload_phase, reload_started
+            if reload_phase is not None and reload_phase != 'bar':
+                reload_watchdog()
+                clear_input(d)
+                return
             if client.frames and frame == client.frames:
                 return False
             d.write(clock_data, struct.pack('<QI', frame * 10000, frame * 1000 // TICK_HZ & 0xffffffff))
@@ -96,20 +117,25 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
                 last_scene = scene
             # Development control is supplied only by the local test harness.
             local = control(frame, client.slot, meta, d) if control else native
-            if client.slot == 0 and control is None:
+            if reload_phase is not None:
+                local = 0
+            if client.slot == 0 and control is None and reload_phase is None:
                 local |= (d.uint(0xbc80cc) & 0x1800) << 9
             raw = []
             if scene == 0:
                 meta['pause'] = d.words(0xbc7af8, 4)
                 meta['battle_phase'] = d.uint(0xadff7c)
                 try:
-                    meta['combat'] = capture_state(d, raw)
+                    presentation = hashlib.sha256()
+                    meta['combat'] = capture_state(d, raw, presentation)
+                    meta['presentation'] = presentation.hexdigest()
                 except (ProtocolError, OSError) as error:
                     record_failure(error, meta, raw, d)
                     raise GameCrashed('게임 상태를 안전하게 읽지 못해 시작 지점에서 복구합니다.') from error
             if stage_pending is not None and frame:
                 meta['stage_checkpoint'] = hashlib.sha256(encode(stage_pending)).hexdigest()
-            digest = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest() if frame else None
+            compared = {key: value for key, value in meta.items() if key != 'presentation'}
+            digest = hashlib.sha256(json.dumps(compared, sort_keys=True).encode()).hexdigest() if frame else None
             recent.append({'frame': frame, 'state': meta, 'entities': raw})
             update = None
             if frame and client.slot == 0 and published is not None and (save_dirty or frame % 120 == 0):
@@ -125,6 +151,36 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
                     stage_pending = None
             except SessionEnded:
                 raise
+            except RecoveryNeeded as error:
+                record_failure(error, meta, raw, d)
+                if not allow_reload or error.mode != 'reload' or scene != 0:
+                    raise
+                client.status('게임을 일시정지했습니다. 상태 차이를 확인하고 같은 창에서 복구합니다…')
+                checkpoint = json.loads(client.reconnect(status=client.status))
+                if client.recovery_mode != 'reload' or client.stage is None:
+                    raise PreparedRestart('현재 장면은 게임 재실행으로 복구해야 합니다.')
+                require(committed is not None and checkpoint['profile'] == committed['profile'], 'Unexpected save identity')
+                if save_store:
+                    save_store.commit(checkpoint)
+                stage = client.stage
+                published = committed = checkpoint
+                save_dirty = False
+                stage_pending = None
+                restore_pending = True
+                reload_phase = 'leave'
+                reload_started = time.monotonic()
+                result['scene_reloads'] += 1
+                if 0x43fab0 not in d.breakpoints:
+                    d.breakpoint(0x43fab0, reload_update)
+                frame = 0
+                last_scene = None
+                recent.clear()
+                next_tick = time.monotonic()
+                clear_input(d)
+                d.write(clock_data, bytes(16))
+                d.write(0xbc91a4, struct.pack('<I', 4))
+                print('SCENE_RELOAD_BEGIN', client.epoch, d.pid, client.inspection, flush=True)
+                return
             except ProtocolError as error:
                 record_failure(error, meta, raw, d)
                 raise
@@ -146,8 +202,8 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             for i, value in enumerate(native_inputs):
                 d.write(d.uint(processors + i * 4) + 4, struct.pack('<I', value))
             d.write(0xbc80cc, struct.pack('<I', (inputs[0] >> 9) & 0x1800))
-            log.write(json.dumps({'frame': frame, 'slot': client.slot, 'local_input': local,
-                                  'inputs': inputs, 'state': meta}, separators=(',', ':')) + '\n')
+            log.write(json.dumps({'epoch': getattr(client, 'epoch', 0), 'frame': frame, 'slot': client.slot, 'local_input': local,
+                                  'inputs': inputs, 'state': compared}, separators=(',', ':')) + '\n')
             frame += 1
             if frame % 240 == 0:
                 print('NETWORK_FRAMES', frame, 'scene', scene, flush=True)
@@ -156,8 +212,9 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             time.sleep(max(0, next_tick - time.monotonic()))
 
         def created(d):
-            nonlocal clock_data
+            nonlocal clock_data, reload_update
             require(d.base == 0x400000, 'Unsupported image base')
+            d.watchdog = reload_watchdog
             from netplay_korean import attach
             attach(d, directory)
             patch(d, 0x427900, bytes.fromhex('8b4424048b4c'), bytes.fromhex('b801000000c3'))
@@ -175,14 +232,33 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             # objects; a direct battle boot leaves them null after a clear.
             d.write(0x497578, struct.pack('<I', 4 if stage else 2))
             def recovery_boot(d, ctx):
-                if restore_pending and d.uint(0xbc91a0) == 4:
-                    d.remove_breakpoint(0x43fab0)
+                nonlocal reload_phase
+                scene = d.uint(0xbc91a0)
+                if reload_phase == 'leave':
+                    require(scene == 0, 'Unexpected scene during reload exit')
+                    d.write(0xbc91a4, struct.pack('<I', 4))
+                    reload_phase = 'bar'
+                elif reload_phase == 'bar':
+                    require(scene == 4, 'Unexpected scene during reload initialization')
                     d.write(0xbc91a4, bytes(4))
-                    ctx.eax = 1
-                    ctx.eip = d.uint(ctx.esp)
-                    ctx.esp += 4
+                    reload_phase = 'battle'
+                elif restore_pending and scene == 4:
+                    d.write(0xbc91a4, bytes(4))
+                else:
+                    return
+                # Return through the original scene manager, which frees the
+                # old scene before initializing the requested scene. Never
+                # directly jump into battle initialization with live objects.
+                ctx.eax = 1
+                ctx.eip = d.uint(ctx.esp)
+                ctx.esp += 4
+            reload_update = recovery_boot
             if stage:
                 d.breakpoint(0x43fab0, recovery_boot)
+            def reload_bar(d, ctx):
+                if reload_phase == 'bar':
+                    materialize(checkpoint, directory / 'DATA/SaveData', discard_unconfirmed=True)
+            d.breakpoint(0x409020, reload_bar)
             # Stay at the online title menu instead of entering attract mode.
             patch(d, 0x477380, bytes.fromhex('e8'), bytes.fromhex('b801000000c3'))
             # Title transition already waits for its frame-counted fade. Do not
@@ -219,9 +295,25 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             d.breakpoint(0x467e70, map_start)
             def stage_start(d, ctx):
                 nonlocal restore_pending, stage_pending
+                nonlocal reload_phase, reload_started, last_scene, next_tick, save_dirty
                 if restore_pending:
+                    if reload_phase is not None:
+                        require(reload_phase == 'battle', 'Unexpected stage initialization')
+                        # Scene teardown may touch private save files. Only
+                        # the server-confirmed checkpoint survives recovery.
+                        materialize(checkpoint, directory / 'DATA/SaveData', discard_unconfirmed=True)
                     restore_stage(d, stage, client.players)
                     restore_pending = False
+                    if 0x43fab0 in d.breakpoints:
+                        d.remove_breakpoint(0x43fab0)
+                    if reload_phase is not None:
+                        reload_phase = reload_started = None
+                        last_scene = None
+                        next_tick = time.monotonic()
+                        save_dirty = False
+                        recent.clear()
+                        print('SCENE_RELOAD_READY', client.epoch, d.pid, flush=True)
+                        client.status(f'게임 창을 유지한 채 {stage["stage"] + 1}스테이지를 다시 불러왔습니다.')
                 if d.uint(0xadeb2c) == 1 and d.uint(0xb064b4) == 0:
                     stage_pending = capture_stage(d, client.players)
                     if stage_observer:
@@ -236,7 +328,8 @@ def run_campaign(directory, client, log_path, *, seconds=None, control=None, ful
             def character_saved(d, ctx):
                 nonlocal save_dirty
                 require(ctx.eax == 1, 'Native character save failed')
-                save_dirty = True
+                if reload_phase is None:
+                    save_dirty = True
             d.breakpoint(0x456c00, character_saved)
             d.breakpoint(0x46a4b0, seed)
             d.breakpoint(0x43d4cc, poll)
