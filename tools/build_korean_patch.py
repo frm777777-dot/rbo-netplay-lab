@@ -92,10 +92,29 @@ def render_label(label):
     return image
 
 
+def validate_dialogue_locations(index, catalog):
+    """Reject executable callback names even when they contain Japanese text."""
+    scripts = {name: read_resource(index, name) for name in index if name.endswith('.FOB')}
+    symbols = set()
+    for name, original in scripts.items():
+        count = struct.unpack_from('<I', original)[0]
+        if 4 + count * 36 > len(original):
+            raise ValueError(f'Invalid script export table: {name}')
+        symbols.update(original[4 + i * 36:36 + i * 36].split(b'\0')[0]
+                       for i in range(count))
+    for row in catalog:
+        original = scripts[row['file']]
+        start, size = row['offset'], row['capacity'] + 1
+        text = original[start:start + size].split(b'\0')[0]
+        if text in symbols:
+            raise ValueError(f'Internal script function is not dialogue: {row["file"]}:{start}')
+
+
 def main():
     source = ROOT / 'runtime/app'
     index = resource_index(source)
     catalog = json.loads((ROOT / 'localization/ko/locations.json').read_bytes())
+    validate_dialogue_locations(index, catalog)
     translated = dict(line.split('\t', 1) for line in (ROOT / 'localization/ko/strings.tsv').read_text(encoding='utf-8').splitlines())
     assert set(translated) == {v['id'] for v in catalog}
     chars = sorted({c for text in translated.values() for c in text if '\uac00' <= c <= '\ud7a3' or '\u3131' <= c <= '\u318e'})

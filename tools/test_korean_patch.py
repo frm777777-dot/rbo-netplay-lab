@@ -73,6 +73,29 @@ class KoreanPatchTests(unittest.TestCase):
                 self.assertEqual(struct.unpack_from('<I', changed, 2)[0],
                                  struct.unpack_from('<I', original, 2)[0] + added * glyph_size)
 
+    def test_script_function_names_and_references_are_unchanged(self):
+        # Japanese text can be a cross-script callback identifier, not dialogue.
+        # Check every occurrence, independently of the translation catalog.
+        scripts = {name: read_resource(self.index, name) for name in self.index
+                   if name.endswith('.FOB')}
+        symbols = set()
+        for name, original in scripts.items():
+            count = struct.unpack_from('<I', original)[0]
+            self.assertLessEqual(4 + count * 36, len(original), name)
+            symbols.update(original[4 + i * 36:36 + i * 36].split(b'\0')[0]
+                           for i in range(count))
+        for name, original in scripts.items():
+            path = self.target / 'korean' / name
+            if not path.exists():
+                continue
+            changed = path.read_bytes()
+            for symbol in symbols - {b''}:
+                start = 0
+                while (start := original.find(symbol + b'\0', start)) >= 0:
+                    with self.subTest(file=name, offset=start, symbol=symbol):
+                        self.assertEqual(changed[start:start + len(symbol) + 1], symbol + b'\0')
+                    start += len(symbol) + 1
+
     def test_images_preserve_dimensions_and_installed_originals(self):
         for name, change in self.pack['assets'].items():
             original = read_resource(self.index, name)
