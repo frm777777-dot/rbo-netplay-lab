@@ -3,7 +3,6 @@ import base64
 import hashlib
 import json
 from pathlib import Path
-import re
 import struct
 import sys
 import tempfile
@@ -12,6 +11,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from netplay_korean import ROOT, PACK, install, resource_index, read_resource
+from korean_validation import controls, validate_catalog
 
 
 class KoreanPatchTests(unittest.TestCase):
@@ -43,9 +43,10 @@ class KoreanPatchTests(unittest.TestCase):
                 self.assertEqual(original[start - 6:start - 4], b'\x01\x00', name)
                 self.assertEqual(struct.unpack_from('<I', original, start - 4)[0] * 4, size, name)
                 self.assertIn(b'\0', changed[start:start + size], name)
-                controls = rb'%[-+0 #]*\d*(?:\.\d+)?[a-zA-Z%]|\\+(?:r|x[bBtT][0-9]*)'
-                self.assertEqual(re.findall(controls, original[start:start + size]),
-                                 re.findall(controls, changed[start:start + size]), name)
+                self.assertEqual(controls(original[start:start + size]),
+                                 controls(changed[start:start + size]), name)
+                _, padding = changed[start:start + size].split(b'\0', 1)
+                self.assertFalse(any(padding), name)
                 restored[start:start + size] = original[start:start + size]
             self.assertEqual(restored, original, name)
 
@@ -66,12 +67,37 @@ class KoreanPatchTests(unittest.TestCase):
             self.assertEqual(original[bitmap:end], changed[bitmap:end], name)
             self.assertEqual(original[end:], changed[end + added * glyph_size:], name)
             table = struct.unpack_from('<32512H', changed, prefix + 8)
+            old_table = struct.unpack_from('<32512H', original, prefix + 8)
+            for before, after in zip(old_table, table):
+                if before != after:
+                    self.assertEqual(before, 0xffff, name)
+                    self.assertTrue(count <= after < count + added, name)
             new_entries = [v for v in table if count <= v < count + added]
             self.assertEqual(sorted(new_entries), list(range(count, count + added)), name)
             self.assertTrue(any(changed[end:end + added * glyph_size]), name)
             if prefix:
                 self.assertEqual(struct.unpack_from('<I', changed, 2)[0],
                                  struct.unpack_from('<I', original, 2)[0] + added * glyph_size)
+
+    def test_all_script_headers_catalog_and_resource_paths(self):
+        scripts = {name: read_resource(self.index, name) for name in self.index
+                   if name.endswith('.FOB')}
+        locations = json.loads((ROOT / 'localization/ko/locations.json').read_bytes())
+        validate_catalog(scripts, locations, self.index)
+        # Independently preserve resource filenames everywhere in patched scripts,
+        # including references omitted from the translation inventory.
+        names = [name.encode('cp932') + b'\0' for name in self.index]
+        for name, original in scripts.items():
+            path = self.target / 'korean' / name
+            if not path.exists():
+                continue
+            changed = path.read_bytes()
+            for resource in names:
+                start = 0
+                while (start := original.upper().find(resource.upper(), start)) >= 0:
+                    self.assertEqual(changed[start:start + len(resource)],
+                                     original[start:start + len(resource)], (name, start))
+                    start += len(resource)
 
     def test_script_function_names_and_references_are_unchanged(self):
         # Japanese text can be a cross-script callback identifier, not dialogue.
@@ -110,6 +136,20 @@ class KoreanPatchTests(unittest.TestCase):
                 self.assertGreaterEqual(offset, 0)
                 self.assertLessEqual(offset + removed, len(original))
                 self.assertLess(len(zlib.decompress(base64.b64decode(encoded))), 4 * 1024 * 1024)
+
+    def test_ui_changes_stay_inside_declared_label_boxes(self):
+        labels = json.loads((ROOT / 'localization/ko/ui.json').read_bytes())
+        for name, rows in labels.items():
+            original = read_resource(self.index, name)
+            restored = bytearray((self.target / 'korean' / name).read_bytes())
+            width, height = struct.unpack_from('<II', original, 12)
+            for row in rows:
+                x, y, w, h = row['box']
+                self.assertTrue(0 <= x < x + w <= width and 0 <= y < y + h <= height, name)
+                for line in range(y, y + h):
+                    start = 20 + (line * width + x) * 4
+                    restored[start:start + w * 4] = original[start:start + w * 4]
+            self.assertEqual(restored, original, name)
 
 
 if __name__ == '__main__':

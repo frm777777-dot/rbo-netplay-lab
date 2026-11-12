@@ -14,6 +14,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from PIL import Image, ImageDraw, ImageFont
 from netplay_korean import ROOT, resource_index, read_resource
+from korean_validation import validate_catalog, validate_replacement, validate_font_slots
 
 FONT = 'C:/Windows/Fonts/malgun.ttf'
 BOLD = 'C:/Windows/Fonts/malgunbd.ttf'
@@ -33,6 +34,7 @@ def glyph_bitmap(char, width, height):
 
 
 def extend_font(original, mapping):
+    validate_font_slots(original, mapping.values())
     data = bytearray(original)
     prefix = 6 if original[:2] == b'\0\0' else 0
     count, width, height, ppb, bits = struct.unpack_from('<HHHBB', original, prefix)
@@ -93,21 +95,8 @@ def render_label(label):
 
 
 def validate_dialogue_locations(index, catalog):
-    """Reject executable callback names even when they contain Japanese text."""
     scripts = {name: read_resource(index, name) for name in index if name.endswith('.FOB')}
-    symbols = set()
-    for name, original in scripts.items():
-        count = struct.unpack_from('<I', original)[0]
-        if 4 + count * 36 > len(original):
-            raise ValueError(f'Invalid script export table: {name}')
-        symbols.update(original[4 + i * 36:36 + i * 36].split(b'\0')[0]
-                       for i in range(count))
-    for row in catalog:
-        original = scripts[row['file']]
-        start, size = row['offset'], row['capacity'] + 1
-        text = original[start:start + size].split(b'\0')[0]
-        if text in symbols:
-            raise ValueError(f'Internal script function is not dialogue: {row["file"]}:{start}')
+    validate_catalog(scripts, catalog, index)
 
 
 def main():
@@ -129,7 +118,9 @@ def main():
     for row in catalog:
         text = translated[row['id']]
         encoded = encode(text)
-        assert len(encoded) <= row['capacity'], (row['file'], row['capacity'], len(encoded), text)
+        original = read_resource(index, row['file'])
+        validate_replacement(original[row['offset']:row['offset'] + row['capacity'] + 1],
+                             encoded, row['capacity'])
         changes.setdefault(row['file'], []).append((row['offset'], row['capacity'] + 1,
                                                    encoded.ljust(row['capacity'] + 1, b'\0')))
     for name in index:

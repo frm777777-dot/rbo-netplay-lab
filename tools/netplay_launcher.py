@@ -24,6 +24,9 @@ from game_settings import pick_game
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 47624
+# Public compatibility marker, not a password. Host credentials and each
+# player's private reconnect ticket remain independently generated secrets.
+DIRECT_JOIN_TOKEN = 'rbo-ex3-direct-join-v1'
 
 
 def connection_status(message):
@@ -119,15 +122,14 @@ def pick_endpoint(path, address=None, port=None, defaults=None):
 
 def connect_guest(game_hash, path, address=None, port=None):
     address, port = pick_endpoint(path, address, port)
-    token = input('방 코드: ').strip()
     while True:
         try:
             print(f'호스트에 연결하고 있습니다… {address}:{port}')
-            return Client((address, port), token, game_hash, timeout=45, status=connection_status)
+            return Client((address, port), DIRECT_JOIN_TOKEN, game_hash, timeout=45, status=connection_status)
         except (OSError, ProtocolError) as error:
             print(f'접속하지 못했습니다: {error}')
             while True:
-                action = input('Enter=다시 시도 / 2=IP·포트·방 코드 수정 / 3=종료: ').strip()
+                action = input('Enter=다시 시도 / 2=IP·포트 수정 / 3=종료: ').strip()
                 if action in ('', '1', '2', '3'):
                     break
                 print('Enter 또는 2, 3을 입력해주세요.')
@@ -135,7 +137,6 @@ def connect_guest(game_hash, path, address=None, port=None):
                 raise
             if action == '2':
                 address, port = pick_endpoint(path, defaults=(address, port))
-                token = input('방 코드: ').strip()
 
 
 def isolated_game(source):
@@ -206,7 +207,7 @@ def main():
     if args.mode == 'host' and args.port is None:
         args.port = DEFAULT_PORT
     require(0 <= args.frames <= 200000, '프레임 제한 값이 올바르지 않습니다.')
-    print('RBO 2~3인 온라인 실험판 v0.7.2 — 한글 이벤트 오류 수정·볼륨 조절')
+    print('RBO 2~3인 온라인 실험판 v0.7.3 — 방 코드 없이 IP·포트로 접속')
     print('각 PC에서 게임의 1P 키 설정을 사용합니다. 친구는 자동으로 2P·3P가 됩니다.')
     print('공통 메뉴와 출발은 1P, 캐릭터 선택·생성과 전투는 각자 조작합니다.')
     print('호스트가 전원 저장하고 친구 PC에도 사본을 보관합니다.\n')
@@ -237,7 +238,7 @@ def main():
                 save_lock = None
                 raise ProtocolError('같은 저장 폴더를 사용하는 호스트가 이미 실행 중입니다.')
             checkpoint = save_store.load()
-            room = Room(secrets.token_urlsafe(18), secrets.token_urlsafe(24),
+            room = Room(DIRECT_JOIN_TOKEN, secrets.token_urlsafe(24),
                         frames=args.frames, delay=args.delay, timeout=45, players=players,
                         diagnostics_dir=logs / 'events')
             server = Server(room, (args.bind, args.port))
@@ -246,8 +247,8 @@ def main():
             client = Client(('127.0.0.1', args.port), room.host_token, game_hash, 'host', timeout=45,
                             status=connection_status)
             print(f'서버 포트: TCP {args.port}')
-            print(f'친구에게 전달할 방 코드: {room.token}')
-            print('친구는 Join-Online.cmd에서 이 PC의 접속 주소·포트·방 코드를 입력합니다.')
+            print('친구는 Join-Online.cmd에서 이 PC의 접속 주소와 포트만 입력합니다.')
+            print('방 이름·방 코드는 필요 없습니다. 주소와 포트는 친구에게 전달하세요.')
             print('외부 인터넷 접속에는 공유기의 포트 연결과 방화벽 허용이 필요합니다.')
         else:
             client = connect_guest(game_hash, args.join_settings, args.address, args.port)

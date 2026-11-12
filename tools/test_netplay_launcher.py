@@ -45,7 +45,7 @@ def main():
                 command += ['--address', '127.0.0.1']
             elif not args.prompt:
                 command += ['--players', str(args.players)]
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            process = subprocess.Popen(command, stdin=subprocess.PIPE if index == 0 and args.prompt else subprocess.DEVNULL, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, text=True, encoding='utf-8',
                                        creationflags=subprocess.CREATE_NO_WINDOW)
             processes.append(process)
@@ -53,17 +53,14 @@ def main():
                 if args.prompt:
                     process.stdin.write('\n')
                     process.stdin.flush()
-                token = None
-                prefix = '친구에게 전달할 방 코드: '
+                listening = False
+                prefix = '서버 포트: TCP '
                 for line in process.stdout:
                     if line.startswith(prefix):
-                        token = line[len(prefix):].strip()
+                        listening = True
                         break
-                if not token:
+                if not listening:
                     raise RuntimeError('Host did not create room')
-            else:
-                process.stdin.write(token + '\n')
-                process.stdin.flush()
         print('LAUNCHER_TEST_STARTED', [p.pid for p in processes], flush=True)
         if args.unlimited:
             while time.monotonic() - started < 120:
@@ -91,10 +88,10 @@ def main():
         messages = []
         for process in processes:
             stdout, _ = process.communicate(timeout=max(1, 150 - (time.monotonic() - started)))
-            messages.append(stdout.replace(token, '[room code omitted]'))
+            messages.append(stdout)
         result = {'exit_codes': [p.returncode for p in processes], 'elapsed': round(time.monotonic() - started, 2),
                   'players': args.players, 'default_prompt_tested': args.prompt,
-                  'default_unlimited_tested': args.unlimited}
+                  'default_unlimited_tested': args.unlimited, 'join_without_stdin': True}
         result['pass'] = result['exit_codes'] == [0] * args.players
         for index, message in enumerate(messages):
             (output / f'{index}.txt').write_text(message, encoding='utf-8')

@@ -13,6 +13,7 @@ import test_support  # Enforce silence in every owned game child.
 from singleplayer import ROOT, play_single, single_store
 from netplay_protocol import ProtocolError
 from netplay_saves import SaveStore, validate
+from netplay_korean import PACK
 
 
 def hashes(directory):
@@ -90,8 +91,9 @@ def main():
         print('SINGLE_TEST_RUN', run + 1, 'PASS', sorted(stages), sorted(phases), flush=True)
     logs = sorted((output / 'logs').glob('*-single-*'))
     assert len(logs) == 2
+    count = len(json.loads(PACK.read_bytes())['assets'])
     for log in logs:
-        assert 'KOREAN_ASSETS 138' in (log / 'bridge.txt').read_text(encoding='utf-8')
+        assert f'KOREAN_ASSETS {count}' in (log / 'bridge.txt').read_text(encoding='utf-8')
         runtime = Path((log / 'runtime.txt').read_text(encoding='utf-8'))
         assert (runtime / 'korean/manifest.json').is_file()
     report = {'passed': True, 'network_unused': True, 'other_saves_unchanged': True,
